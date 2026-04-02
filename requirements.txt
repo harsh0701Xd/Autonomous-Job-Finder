@@ -1,0 +1,53 @@
+# ── Core orchestration ────────────────────────────────────────────────────────
+langgraph>=0.2.0
+langchain-anthropic>=0.1.0
+langchain-core>=0.2.0
+
+# ── LLM ──────────────────────────────────────────────────────────────────────
+anthropic>=0.30.0
+
+# ── Resume parsing ────────────────────────────────────────────────────────────
+pymupdf>=1.24.0          # PDF text extraction (fitz)
+python-docx>=1.1.0       # DOCX text extraction
+
+# ── API layer ─────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0   # [standard] includes websockets + httptools
+python-multipart>=0.0.9     # required for FastAPI file uploads
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9      # Postgres driver (binary = no build deps)
+sqlalchemy>=2.0.0           # ORM for application tracking DB
+langgraph-checkpoint-postgres>=0.0.1  # LangGraph Postgres checkpointer
+
+# ── Embeddings & vector store ─────────────────────────────────────────────────
+sentence-transformers>=3.0.0   # local embeddings, zero API cost
+chromadb>=0.5.0                # local vector store (dev)
+# pinecone-client>=4.0.0       # uncomment for production vector store
+
+# ── Job search APIs (Agent 3) ─────────────────────────────────────────────────
+httpx>=0.27.0         # async HTTP client for API calls
+aiohttp>=3.9.0        # async HTTP (Firecrawl / scraping)
+
+# ── Hiring signals (Agent 5) ──────────────────────────────────────────────────
+feedparser>=6.0.11    # RSS feed parsing for news signals
+# firecrawl-py>=0.0.16  # uncomment when Agent 5 is built
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic>=2.7.0
+pydantic-settings>=2.3.0   # settings management via .env
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0    # .env file loading
+tenacity>=8.3.0         # retry logic with exponential backoff
+structlog>=24.2.0       # structured JSON logging
+
+# ── MLOps (Upgrade Layer 4) ───────────────────────────────────────────────────
+# mlflow>=2.14.0        # uncomment when monitoring layer is built
+# wandb>=0.17.0         # uncomment when drift detection is built
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.2.0
+pytest-asyncio>=0.23.0    # async test support
+pytest-mock>=3.14.0       # mock/patch helpers
+httpx>=0.27.0             # also used for FastAPI TestClient in integration tests
