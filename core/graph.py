@@ -231,9 +231,11 @@ def resume_after_confirmation(
     """
     Resume the graph after the user has confirmed their profile selections.
 
-    The graph picks up from exactly where it paused (user_confirmation node).
-    Passes the user's selections as the interrupt resume value.
+    Uses LangGraph's Command(resume=...) pattern to pass the user's
+    selections back to the interrupt point in user_confirmation node.
     """
+    from langgraph.types import Command
+
     config = create_session_config(session_id)
 
     resume_payload = {
@@ -242,7 +244,7 @@ def resume_after_confirmation(
     }
 
     state = graph.invoke(
-        {"__resume__": resume_payload},  # LangGraph resume mechanism
+        Command(resume=resume_payload),
         config=config,
     )
 

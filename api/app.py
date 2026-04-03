@@ -18,6 +18,11 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+# Load .env before anything else — must happen before any os.getenv() calls
+load_dotenv()
+
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,15 +49,27 @@ async def lifespan(app: FastAPI):
     Pre-warms the LangGraph instance so the first request isn't slow.
     """
     logger.info("Starting Autonomous Job Finder API...")
+
+    # Validate required environment variables upfront
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.error(
+            "ANTHROPIC_API_KEY is not set. "
+            "Add it to your .env file and restart the server."
+        )
+    elif not api_key.startswith("sk-ant-"):
+        logger.warning("ANTHROPIC_API_KEY looks malformed — double-check your .env file.")
+    else:
+        logger.info("ANTHROPIC_API_KEY loaded OK.")
+
     from api.dependencies import get_graph
     try:
         get_graph()
         logger.info("LangGraph pipeline ready.")
     except Exception as e:
         logger.error(f"Failed to initialise graph: {e}")
-        # Don't crash on startup — let individual requests fail with a clear error
 
-    yield  # app runs here
+    yield
 
     logger.info("Shutting down Autonomous Job Finder API.")
 

@@ -275,8 +275,11 @@ async def confirm_profiles(
     graph = get_graph()
     config = {"configurable": {"thread_id": session_id}}
 
-    # Resume the graph from the interrupt point
-    # LangGraph picks up from user_confirmation node with this payload
+    # Resume the graph from the interrupt point using LangGraph Command
+    # The graph paused at user_confirmation node — we resume by passing
+    # the user's selection as the interrupt resume value via Command
+    from langgraph.types import Command
+
     resume_payload = {
         "selected_titles": body.selected_titles,
         "custom_profiles": body.custom_profiles,
@@ -284,7 +287,7 @@ async def confirm_profiles(
 
     try:
         final_state_dict = graph.invoke(
-            {"__resume__": resume_payload},
+            Command(resume=resume_payload),
             config=config,
         )
     except Exception as e:
@@ -295,7 +298,22 @@ async def confirm_profiles(
             detail=f"Pipeline resume error: {e}",
         )
 
-    final_state = SessionState(**final_state_dict)
+    # Fetch full state from checkpointer and reconstruct SessionState
+    try:
+        checkpoint = graph.get_state(config)
+        state_dict = checkpoint.values if checkpoint else {}
+        final_state = SessionState(**state_dict)
+    except Exception as e:
+        logger.error(f"[routes] State reconstruction error: {e}")
+        # Fallback — build minimal confirmed response from body directly
+        from agents.recommender.profile_recommender import apply_user_confirmation
+        # Get state from what we know
+        checkpoint = graph.get_state(config)
+        state_dict = checkpoint.values if checkpoint else {}
+        final_state = SessionState(**state_dict) if state_dict else SessionState(
+            session_id=session_id,
+            confirmed_profiles=[],
+        )
 
     if final_state.error:
         update_session_status(session_id, "error")

@@ -22,6 +22,7 @@ class SkillSet(BaseModel):
 
 
 class WorkExperience(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     title: str
     company: str
     duration_months: Optional[int] = None
@@ -30,19 +31,22 @@ class WorkExperience(BaseModel):
 
 
 class Education(BaseModel):
+    model_config = ConfigDict(extra="ignore")  # silently drop gpa, major, etc.
     degree: str
-    field: str
+    field: Optional[str] = None          # Claude sometimes returns "major" instead
     institution: str
     year: Optional[int] = None
 
 
 class NotableProject(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     name: Optional[str] = None
     description: str
     tech_used: list[str] = Field(default_factory=list)
 
 
 class CareerGap(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     approx_duration_months: int
     position_in_timeline: Literal["early", "mid", "recent"]
 
@@ -199,10 +203,9 @@ class SessionState(BaseModel):
     current_agent: Optional[str] = None
     error: Optional[str] = None
     pipeline_complete: bool = False
-    
 
-model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-@field_serializer("created_at", "updated_at")
-def serialize_datetime(self, v: datetime) -> str:
-    return v.isoformat()
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, v: datetime) -> str:
+        return v.isoformat()
