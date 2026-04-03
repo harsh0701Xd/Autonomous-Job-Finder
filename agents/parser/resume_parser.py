@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 
 MIN_TEXT_LENGTH = 200          # chars — below this we treat parse as failed
-CLAUDE_MODEL    = "claude-sonnet-4-6"
-MAX_TOKENS      = 2048
+CLAUDE_MODEL    = "claude-haiku-4-5-20251001"
+MAX_TOKENS      = 4096
 
 
 # ── Text extraction ──────────────────────────────────────────────────────────
@@ -105,11 +105,14 @@ def call_claude_for_parse(resume_text: str, use_fallback: bool = False) -> str:
     Call Claude API to extract structured profile from resume text.
     Retries up to 3 times with exponential backoff on transient failures.
     Returns raw JSON string.
+
+    Uses str.replace() instead of .format() — resume text may contain
+    curly braces (e.g. from code snippets or JSON) which break .format().
     """
     client = anthropic.Anthropic()
 
     prompt_template = RESUME_PARSE_FALLBACK_PROMPT if use_fallback else RESUME_PARSE_PROMPT
-    prompt = prompt_template.format(resume_text=resume_text)
+    prompt = prompt_template.replace("{resume_text}", resume_text)
 
     logger.info(f"Calling Claude for resume parse (fallback={use_fallback})")
 
@@ -128,13 +131,41 @@ def call_claude_for_parse(resume_text: str, use_fallback: bool = False) -> str:
 
 def clean_json_response(raw: str) -> str:
     """
-    Strip accidental markdown fences or preamble from LLM response.
-    Claude is instructed not to add these, but defensive cleaning is cheap.
+    Strip accidental markdown fences, preamble, or leading whitespace
+    from LLM response. Finds the first { or [ and last } or ] to extract
+    clean JSON even if Claude adds text before or after.
     """
-    # Remove ```json ... ``` fences if present
+    # Strip markdown fences
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE)
-    return raw.strip()
+    raw = raw.strip()
+
+    # Find the actual JSON boundaries — handles leading newlines or preamble text
+    # Look for first { or [ (whichever comes first)
+    obj_start = raw.find("{")
+    arr_start = raw.find("[")
+
+    if obj_start == -1 and arr_start == -1:
+        return raw  # no JSON found — let the caller handle it
+
+    if obj_start == -1:
+        start = arr_start
+        end = raw.rfind("]") + 1
+    elif arr_start == -1:
+        start = obj_start
+        end = raw.rfind("}") + 1
+    else:
+        start = min(obj_start, arr_start)
+        # Find matching closing bracket
+        if start == obj_start:
+            end = raw.rfind("}") + 1
+        else:
+            end = raw.rfind("]") + 1
+
+    if end <= start:
+        return raw
+
+    return raw[start:end]
 
 
 def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile:
@@ -147,7 +178,10 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(f"LLM returned invalid JSON: {e}\nRaw: {cleaned[:300]}") from e
+        raise ValueError(
+            f"LLM returned invalid JSON: {e}\n"
+            f"Cleaned response (first 300 chars): {cleaned[:300]}"
+        ) from e
 
     # Build nested Pydantic objects defensively
     skills_data = data.get("skills") or {}
@@ -158,9 +192,14 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
     )
 
     education = [
-        Education(**edu)
+        Education(
+            degree      = edu.get("degree", ""),
+            field       = edu.get("field") or edu.get("major"),  # Claude sometimes returns "major"
+            institution = edu.get("institution", ""),
+            year        = edu.get("year"),
+        )
         for edu in (data.get("education") or [])
-        if isinstance(edu, dict)
+        if isinstance(edu, dict) and edu.get("degree") and edu.get("institution")
     ]
 
     work_experience = [
@@ -182,18 +221,24 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
     ]
 
     profile = CandidateProfile(
-        current_title=data.get("current_title"),
-        years_experience=data.get("years_experience"),
-        seniority_level=data.get("seniority_level"),
-        skills=skills,
-        education=education,
-        work_experience=work_experience,
-        career_trajectory=data.get("career_trajectory"),
-        pivot_signals=data.get("pivot_signals") or [],
-        domain_expertise=data.get("domain_expertise") or [],
-        notable_projects=notable_projects,
-        career_gaps=career_gaps,
-        raw_text=resume_text,
+        current_title    = data.get("current_title"),
+        years_experience = data.get("years_experience"),
+        seniority_level  = data.get("seniority_level")
+                           if data.get("seniority_level") in
+                           {"intern","junior","mid","senior","lead","principal","executive",None}
+                           else None,
+        skills           = skills,
+        education        = education,
+        work_experience  = work_experience,
+        career_trajectory = data.get("career_trajectory")
+                            if data.get("career_trajectory") in
+                            {"ascending","lateral","pivot","re-entry",None}
+                            else None,
+        pivot_signals    = data.get("pivot_signals") or [],
+        domain_expertise = data.get("domain_expertise") or [],
+        notable_projects = notable_projects,
+        career_gaps      = career_gaps,
+        raw_text         = resume_text,
     )
 
     return profile
@@ -275,7 +320,7 @@ def run_resume_parser(
     except Exception as e:
         state.parse_failed = True
         state.parse_failure_reason = f"Unexpected error during parsing: {e}"
-        logger.error(f"[resume_parser] Unexpected error: {e}")
+        logger.error(f"[resume_parser] Unexpected error: {e}", exc_info=True)
         return state
 
     # ── Step 4: Write to state ───────────────────────────────────────────────
