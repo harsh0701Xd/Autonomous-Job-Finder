@@ -185,12 +185,15 @@ def build_graph(use_postgres: bool = False):
             db_url = os.getenv("DATABASE_URL")
             if not db_url:
                 raise ValueError("DATABASE_URL not set")
+            # Create pool with open=False — lifespan will open it async
             pool = AsyncConnectionPool(
                 conninfo=db_url,
                 max_size=10,
                 open=False,
             )
             checkpointer = AsyncPostgresSaver(pool)
+            # Store pool on checkpointer so lifespan can access it
+            checkpointer._pool = pool
             logger.info("[graph] Using Postgres checkpointer (async)")
         except Exception as e:
             logger.warning(

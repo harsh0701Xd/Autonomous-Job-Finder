@@ -181,11 +181,17 @@ async def upload_resume(
     try:
         final_state_dict = await graph.ainvoke(initial_state, config=config)
     except Exception as e:
-        logger.error(f"[routes] Pipeline error for session {session_id}: {e}")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(
+            f"[routes] Pipeline error for session {session_id}\n"
+            f"Type: {type(e).__name__} | Repr: {e!r}\n"
+            f"Traceback:\n{tb}"
+        )
         update_session_status(session_id, "error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Pipeline error: {e}",
+            detail=f"Pipeline error: {type(e).__name__}: {e!r}",
         )
 
     # Reconstruct state object from dict
@@ -291,26 +297,26 @@ async def confirm_profiles(
             config=config,
         )
     except Exception as e:
-        logger.error(f"[routes] Resume error for session {session_id}: {e}")
+        import traceback
+        logger.error(
+            f"[routes] Resume error for session {session_id}\n"
+            f"Type: {type(e).__name__} | Repr: {e!r}\n"
+            f"Traceback:\n{traceback.format_exc()}"
+        )
         update_session_status(session_id, "error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Pipeline resume error: {e}",
+            detail=f"Pipeline resume error: {type(e).__name__}: {e!r}",
         )
 
     # Fetch full state from checkpointer and reconstruct SessionState
     try:
-        checkpoint = graph.get_state(config)
+        checkpoint = await graph.aget_state(config)
         state_dict = checkpoint.values if checkpoint else {}
         final_state = SessionState(**state_dict)
     except Exception as e:
-        logger.error(f"[routes] State reconstruction error: {e}")
-        # Fallback — build minimal confirmed response from body directly
-        from agents.recommender.profile_recommender import apply_user_confirmation
-        # Get state from what we know
-        checkpoint = graph.get_state(config)
-        state_dict = checkpoint.values if checkpoint else {}
-        final_state = SessionState(**state_dict) if state_dict else SessionState(
+        logger.error(f"[routes] State reconstruction error: {e}", exc_info=True)
+        final_state = SessionState(
             session_id=session_id,
             confirmed_profiles=[],
         )
@@ -363,7 +369,7 @@ async def get_status(session_id: str) -> PipelineStatus:
 
     # Fetch current persisted state from checkpointer
     try:
-        checkpoint = graph.get_state(config)
+        checkpoint = await graph.aget_state(config)
         state_dict = checkpoint.values if checkpoint else {}
     except Exception as e:
         logger.warning(f"[routes] Could not fetch graph state for {session_id}: {e}")
@@ -424,7 +430,7 @@ async def get_results(session_id: str) -> ResultsResponse:
     config = {"configurable": {"thread_id": session_id}}
 
     try:
-        checkpoint = graph.get_state(config)
+        checkpoint = await graph.aget_state(config)
         state_dict = checkpoint.values if checkpoint else {}
     except Exception as e:
         raise HTTPException(

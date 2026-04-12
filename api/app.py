@@ -65,18 +65,17 @@ async def lifespan(app: FastAPI):
     from api.dependencies import get_graph
     try:
         graph = get_graph()
-        # If using AsyncPostgresSaver, open the pool and run setup
+        # If using AsyncPostgresSaver, open pool and create tables
         checkpointer = getattr(graph, "checkpointer", None)
-        if checkpointer and hasattr(checkpointer, "conn"):
-            pool = getattr(checkpointer, "conn", None)
-            if pool and hasattr(pool, "open"):
-                await pool.open()
-                logger.info("[app] Async connection pool opened")
+        if checkpointer and hasattr(checkpointer, "_pool"):
+            pool = checkpointer._pool
+            await pool.open()
+            logger.info("[app] Async connection pool opened")
             await checkpointer.setup()
             logger.info("[app] Postgres checkpoint tables ready")
         logger.info("LangGraph pipeline ready.")
     except Exception as e:
-        logger.error(f"Failed to initialise graph: {e}")
+        logger.error(f"Failed to initialise graph: {e}", exc_info=True)
 
     yield
 

@@ -12,7 +12,7 @@ services:
     env_file:
       - .env
     environment:
-      - APP_ENV=development
+      - APP_ENV=production
       - DATABASE_URL=postgresql://jobfinder:jobfinder@postgres:5432/jobfinder
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
