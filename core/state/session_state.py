@@ -25,7 +25,9 @@ class WorkExperience(BaseModel):
     model_config = ConfigDict(extra="ignore")
     title: str
     company: str
-    duration_months: Optional[int] = None
+    start_date: Optional[str] = None       # YYYY-MM format, from LLM
+    end_date: Optional[str] = None         # YYYY-MM format, null = present
+    duration_months: Optional[int] = None  # calculated in Python post-parse
     responsibilities: list[str] = Field(default_factory=list)
     impact_signals: list[str] = Field(default_factory=list)
 
@@ -157,9 +159,6 @@ class UserPreferences(BaseModel):
     location: str
     work_type: Literal["remote", "hybrid", "on-site", "any"] = "any"
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    currency: str = "USD"
 
 
 # ─────────────────────────────────────────────

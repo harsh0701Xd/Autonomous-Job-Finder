@@ -1,5 +1,5 @@
 """
-frontend/streamlit_app.py
+frontend/app.py
 
 Autonomous Job Finder — Streamlit Frontend
 
@@ -158,14 +158,6 @@ def show_onboarding():
                 }[x],
             )
 
-        salary_min = st.number_input(
-            "Min salary (INR / year, optional)",
-            min_value=0,
-            step=100000,
-            value=0,
-            format="%d",
-        )
-
     st.divider()
 
     ready = uploaded and location.strip()
@@ -181,14 +173,13 @@ def show_onboarding():
             location   = location.strip(),
             work_type  = work_type,
             seniority  = seniority,
-            salary_min = int(salary_min) if salary_min > 0 else None,
         )
 
     if not ready:
         st.caption("Upload your resume and enter a location to continue.")
 
 
-def _run_onboarding(uploaded, location, work_type, seniority, salary_min):
+def _run_onboarding(uploaded, location, work_type, seniority):
     with st.spinner("Creating session..."):
         try:
             sess = _api_post(
@@ -197,8 +188,6 @@ def _run_onboarding(uploaded, location, work_type, seniority, salary_min):
                     "location":             location,
                     "work_type":            work_type,
                     "seniority_preference": seniority,
-                    "salary_min":           salary_min,
-                    "currency":             "INR",
                 },
             )
             st.session_state.session_id = sess["session_id"]

@@ -41,7 +41,6 @@ User preferences:
 - Location: {location}
 - Work type: {work_type}
 - Seniority preference: {seniority_preference}
-- Salary range: {salary_range}
 
 Return ONLY the JSON array.
 """.strip()

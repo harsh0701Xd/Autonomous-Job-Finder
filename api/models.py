@@ -25,9 +25,6 @@ class CreateSessionRequest(BaseModel):
     location: str = Field(..., description="Preferred job location, e.g. 'Bangalore' or 'Remote'")
     work_type: Literal["remote", "hybrid", "on-site", "any"] = "any"
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
-    salary_min: Optional[int] = Field(None, description="Minimum annual salary")
-    salary_max: Optional[int] = Field(None, description="Maximum annual salary")
-    currency: str = Field("USD", description="Currency code, e.g. 'USD', 'INR'")
 
 
 class CreateSessionResponse(BaseModel):

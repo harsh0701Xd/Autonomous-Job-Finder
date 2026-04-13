@@ -41,22 +41,40 @@ def _build_query(
 ) -> str:
     """
     Build a natural language search query from profile + preferences.
-    JSearch handles free-text queries natively — no routing needed.
+
+    JSearch's native API only supports work_from_home=true for remote.
+    For hybrid and on-site we enrich the query string — Google for Jobs
+    indexes these terms and uses them for relevance ranking.
     """
     if work_type == "remote":
         return f"{profile_title} remote"
+    elif work_type == "hybrid":
+        return f"{profile_title} hybrid {location}"
+    elif work_type == "on-site":
+        return f"{profile_title} onsite {location}"
     return f"{profile_title} {location}"
 
 
-def _work_type_filter(work_type: str) -> Optional[str]:
-    """Map our work_type to JSearch employment_types param."""
-    mapping = {
-        "remote":  "FULLTIME",
-        "hybrid":  "FULLTIME",
-        "on-site": "FULLTIME",
-        "any":     "FULLTIME",
-    }
-    return mapping.get(work_type, "FULLTIME")
+def _should_include(job: dict, work_type: str) -> bool:
+    """
+    Post-fetch work type filter using JSearch's job_is_remote field.
+
+    JSearch returns job_is_remote (bool) per listing. We use this to
+    filter results after fetching since the API has no native hybrid/
+    on-site filter parameter.
+
+    - remote:  keep only remote jobs
+    - on-site: keep only non-remote jobs
+    - hybrid:  keep all (hybrid is ambiguous in listings — many hybrid
+               jobs are not flagged as remote, so excluding remote is
+               too aggressive)
+    - any:     keep all
+    """
+    if work_type == "remote":
+        return job.get("job_is_remote", False) is True
+    if work_type == "on-site":
+        return job.get("job_is_remote", False) is not True
+    return True  # hybrid and any — no filtering
 
 
 @retry(
@@ -80,7 +98,7 @@ async def search_jsearch(
         num_pages:     number of result pages (10 results per page)
 
     Returns:
-        List of raw job dicts from JSearch API.
+        List of raw job dicts from JSearch API, filtered by work_type.
         Empty list on error (logged, not raised — don't block pipeline).
     """
     query = _build_query(profile_title, location, work_type)
@@ -88,10 +106,10 @@ async def search_jsearch(
     params = {
         "query":            query,
         "num_pages":        str(num_pages),
-        "employment_types": _work_type_filter(work_type),
+        "employment_types": "FULLTIME",
     }
 
-    # Add remote filter if applicable
+    # JSearch native remote filter — only valid signal available from API
     if work_type == "remote":
         params["work_from_home"] = "true"
 
@@ -110,6 +128,16 @@ async def search_jsearch(
             data = response.json()
 
         jobs = data.get("data", [])
+
+        # Post-fetch filter by work type using job_is_remote field
+        before = len(jobs)
+        jobs = [j for j in jobs if _should_include(j, work_type)]
+        if before != len(jobs):
+            logger.info(
+                f"[jsearch] work_type filter '{work_type}': "
+                f"{before} → {len(jobs)} jobs"
+            )
+
         logger.info(f"[jsearch] Returned {len(jobs)} jobs for '{query}'")
         return jobs
 

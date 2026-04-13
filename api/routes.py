@@ -147,9 +147,6 @@ async def upload_resume(
         location             = prefs_data["location"],
         work_type            = prefs_data["work_type"],
         seniority_preference = prefs_data["seniority_preference"],
-        salary_min           = prefs_data.get("salary_min"),
-        salary_max           = prefs_data.get("salary_max"),
-        currency             = prefs_data.get("currency", "USD"),
     )
 
     initial_state = SessionState(
@@ -176,7 +173,17 @@ async def upload_resume(
 
     # Run graph until it hits the confirmation interrupt
     graph = get_graph()
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {"thread_id": session_id},
+        "run_name": f"parse-and-recommend | {session_id[:8]}",
+        "tags": ["parse", "recommend", "phase-1"],
+        "metadata": {
+            "session_id":  session_id,
+            "location":    prefs_data.get("location"),
+            "work_type":   prefs_data.get("work_type"),
+            "resume_file": file.filename,
+        },
+    }
 
     try:
         final_state_dict = await graph.ainvoke(initial_state, config=config)
@@ -279,7 +286,17 @@ async def confirm_profiles(
         )
 
     graph = get_graph()
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {"thread_id": session_id},
+        "run_name": f"search-rank-signals | {session_id[:8]}",
+        "tags": ["search", "rank", "signals", "phase-2"],
+        "metadata": {
+            "session_id":        session_id,
+            "selected_profiles": body.selected_titles,
+            "custom_profiles":   body.custom_profiles,
+            "total_profiles":    len(body.selected_titles) + len(body.custom_profiles),
+        },
+    }
 
     # Resume the graph from the interrupt point using LangGraph Command
     # The graph paused at user_confirmation node — we resume by passing
