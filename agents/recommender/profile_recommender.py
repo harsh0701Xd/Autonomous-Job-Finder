@@ -25,6 +25,7 @@ import re
 from typing import Optional
 
 import anthropic
+from langsmith import traceable
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.prompts.recommender_prompts import (
@@ -42,16 +43,6 @@ MAX_PROFILES = 5
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
-
-def _format_salary_range(prefs: UserPreferences) -> str:
-    """Convert salary preferences to a human-readable string for the prompt."""
-    if prefs.salary_min and prefs.salary_max:
-        return (
-            f"{prefs.currency} {prefs.salary_min:,} – {prefs.salary_max:,} per year"
-        )
-    if prefs.salary_min:
-        return f"{prefs.currency} {prefs.salary_min:,}+ per year"
-    return "not specified"
 
 
 def _profile_to_prompt_json(state: SessionState) -> str:
@@ -106,6 +97,11 @@ def _profile_to_prompt_json(state: SessionState) -> str:
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
+@traceable(
+    name="claude-profile-recommender",
+    run_type="llm",
+    metadata={"model": CLAUDE_MODEL, "agent": "profile_recommender"},
+)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -227,6 +223,7 @@ def _validate_preconditions(state: SessionState) -> Optional[str]:
 
 # ── Main agent function ───────────────────────────────────────────────────────
 
+@traceable(name="agent-2-profile-recommender", run_type="chain")
 def run_profile_recommender(state: SessionState) -> SessionState:
     """
     Agent 2 — Profile Recommender.
@@ -263,7 +260,6 @@ def run_profile_recommender(state: SessionState) -> SessionState:
         .replace("{location}",             prefs.location)
         .replace("{work_type}",            prefs.work_type)
         .replace("{seniority_preference}", prefs.seniority_preference)
-        .replace("{salary_range}",         _format_salary_range(prefs))
     )
 
     # ── LLM call + parse ─────────────────────────────────────────────────────

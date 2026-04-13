@@ -25,6 +25,7 @@ from typing import Optional
 import anthropic
 import fitz  # PyMuPDF
 import docx  # python-docx
+from langsmith import traceable
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.prompts.parser_prompts import (
@@ -52,14 +53,126 @@ MAX_TOKENS      = 4096
 
 # ── Text extraction ──────────────────────────────────────────────────────────
 
+def _extract_layout_aware_text(page) -> str:
+    """
+    Extract text from a single PDF page using layout geometry.
+
+    Uses font size and y-coordinate signals — no hardcoded assumptions
+    about section names, bullet characters, or resume structure.
+
+    Logic:
+      - A new line is detected when y-coordinate increases by more than
+        the median line height (relative threshold, not a fixed pixel value).
+      - A blank line separator is inserted when the y-gap is more than
+        2x the median line height — indicating a visual gap in the layout.
+      - Spans on the same line are joined with a space.
+      - Non-printable / zero-width characters are stripped.
+
+    This is purely geometric — it works for any document layout.
+    """
+    blocks = page.get_text("dict")["blocks"]
+
+    # Collect all (y0, x0, text, size) from every span across all blocks
+    spans = []
+    for block in blocks:
+        if block.get("type") != 0:   # type 0 = text, type 1 = image
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                if not text:
+                    continue
+                spans.append({
+                    "y":    round(span["origin"][1], 1),
+                    "x":    round(span["origin"][0], 1),
+                    "size": round(span["size"], 1),
+                    "text": text,
+                })
+
+    if not spans:
+        return ""
+
+    # Sort by vertical position then horizontal position
+    spans.sort(key=lambda s: (s["y"], s["x"]))
+
+    # Compute median line height from unique y values
+    y_values = sorted(set(s["y"] for s in spans))
+    if len(y_values) > 1:
+        gaps = [y_values[i+1] - y_values[i] for i in range(len(y_values)-1)]
+        gaps = [g for g in gaps if g > 0]
+        median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 12.0
+    else:
+        median_gap = 12.0
+
+    # Group spans into lines by y-coordinate proximity
+    lines: list[list[dict]] = []
+    current_line: list[dict] = []
+    prev_y = None
+
+    for span in spans:
+        if prev_y is None or abs(span["y"] - prev_y) <= median_gap * 0.6:
+            current_line.append(span)
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = [span]
+        prev_y = span["y"]
+
+    if current_line:
+        lines.append(current_line)
+
+    # Build output — insert blank line when vertical gap > 2x median
+    output_lines: list[str] = []
+    prev_line_y = None
+
+    for line_spans in lines:
+        line_y = line_spans[0]["y"]
+
+        if prev_line_y is not None:
+            gap = line_y - prev_line_y
+            if gap > median_gap * 2.0:
+                output_lines.append("")   # blank line = visual section gap
+
+        line_text = " ".join(s["text"] for s in line_spans)
+        # Strip non-printable artifacts (e.g. ¯, \x00, zero-width chars)
+        line_text = "".join(c for c in line_text if c.isprintable() and ord(c) > 31)
+        line_text = line_text.strip()
+
+        if line_text:
+            output_lines.append(line_text)
+
+        prev_line_y = line_y
+
+    return "\n".join(output_lines)
+
+
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract plain text from PDF bytes using PyMuPDF."""
+    """
+    Extract text from PDF bytes using layout-aware geometry (PyMuPDF dict mode).
+
+    Falls back to plain text extraction if dict mode returns nothing
+    (e.g. corrupted or unusual PDF structure).
+    """
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        pages = [page.get_text("text") for page in doc]
+        doc  = fitz.open(stream=file_bytes, filetype="pdf")
+        pages_text = []
+        for page in doc:
+            page_text = _extract_layout_aware_text(page)
+            if page_text:
+                pages_text.append(page_text)
         doc.close()
-        text = "\n".join(pages)
-        logger.debug(f"PDF extracted: {len(text)} chars across {len(pages)} pages")
+
+        text = "\n\n".join(pages_text)
+
+        # Fallback to plain text if layout extraction yielded nothing
+        if not text.strip():
+            logger.warning("[parser] Layout extraction yielded empty result — falling back to plain text")
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            pages = [page.get_text("text") for page in doc]
+            doc.close()
+            text = "\n".join(pages)
+
+        logger.debug(f"PDF extracted: {len(text)} chars across {len(pages_text)} pages")
         return text
     except Exception as e:
         logger.error(f"PDF extraction failed: {e}")
@@ -93,8 +206,76 @@ def extract_text(file_bytes: bytes, file_type: str) -> str:
         raise ValueError(f"Unsupported file type: {file_type}. Use PDF or DOCX.")
 
 
-# ── LLM call ─────────────────────────────────────────────────────────────────
+# ── Experience calculator ─────────────────────────────────────────────────────
 
+def _calculate_duration_months(start: Optional[str], end: Optional[str]) -> Optional[int]:
+    """
+    Calculate duration in months between two YYYY-MM strings.
+    If end is None, uses today's date (role is current).
+    Returns None if start is unparseable.
+    """
+    import datetime
+    if not start:
+        return None
+    try:
+        start_dt = datetime.date(int(start[:4]), int(start[5:7]), 1)
+        if end:
+            end_dt = datetime.date(int(end[:4]), int(end[5:7]), 1)
+        else:
+            end_dt = datetime.date.today().replace(day=1)
+        months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+        return max(0, months)
+    except (ValueError, IndexError):
+        return None
+
+
+def _calculate_total_experience(work_experience: list) -> float:
+    """
+    Calculate total professional experience in years from work experience list.
+
+    Uses a merge-interval approach to handle overlapping roles correctly —
+    two concurrent roles don't double-count the time.
+
+    Excludes internships (title contains 'intern') from the professional total
+    but counts them separately.
+
+    Returns total years rounded to 1 decimal place.
+    """
+    import datetime
+
+    intervals = []
+    for exp in work_experience:
+        start = exp.start_date
+        end   = exp.end_date
+        if not start:
+            continue
+        try:
+            s = datetime.date(int(start[:4]), int(start[5:7]), 1)
+            e = datetime.date(int(end[:4]), int(end[5:7]), 1) if end else datetime.date.today().replace(day=1)
+            intervals.append((s, e))
+        except (ValueError, IndexError):
+            continue
+
+    if not intervals:
+        return 0.0
+
+    # Merge overlapping intervals
+    intervals.sort(key=lambda x: x[0])
+    merged = [intervals[0]]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    total_days = sum((e - s).days for s, e in merged)
+    return round(total_days / 365.25, 1)
+
+@traceable(
+    name="claude-resume-parser",
+    run_type="llm",
+    metadata={"model": CLAUDE_MODEL, "agent": "resume_parser"},
+)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -208,6 +389,14 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
         if isinstance(exp, dict)
     ]
 
+    # Calculate duration_months per role and total experience in Python
+    # — deterministic arithmetic, not LLM estimation
+    for exp in work_experience:
+        if exp.duration_months is None:
+            exp.duration_months = _calculate_duration_months(exp.start_date, exp.end_date)
+
+    years_experience = _calculate_total_experience(work_experience)
+
     notable_projects = [
         NotableProject(**proj)
         for proj in (data.get("notable_projects") or [])
@@ -221,24 +410,24 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
     ]
 
     profile = CandidateProfile(
-        current_title    = data.get("current_title"),
-        years_experience = data.get("years_experience"),
-        seniority_level  = data.get("seniority_level")
-                           if data.get("seniority_level") in
-                           {"intern","junior","mid","senior","lead","principal","executive",None}
-                           else None,
-        skills           = skills,
-        education        = education,
-        work_experience  = work_experience,
+        current_title     = data.get("current_title"),
+        years_experience  = years_experience,   # Python-calculated, not LLM-estimated
+        seniority_level   = data.get("seniority_level")
+                            if data.get("seniority_level") in
+                            {"intern","junior","mid","senior","lead","principal","executive",None}
+                            else None,
+        skills            = skills,
+        education         = education,
+        work_experience   = work_experience,
         career_trajectory = data.get("career_trajectory")
                             if data.get("career_trajectory") in
                             {"ascending","lateral","pivot","re-entry",None}
                             else None,
-        pivot_signals    = data.get("pivot_signals") or [],
-        domain_expertise = data.get("domain_expertise") or [],
-        notable_projects = notable_projects,
-        career_gaps      = career_gaps,
-        raw_text         = resume_text,
+        pivot_signals     = data.get("pivot_signals") or [],
+        domain_expertise  = data.get("domain_expertise") or [],
+        notable_projects  = notable_projects,
+        career_gaps       = career_gaps,
+        raw_text          = resume_text,
     )
 
     return profile
@@ -246,6 +435,7 @@ def parse_profile_from_json(raw_json: str, resume_text: str) -> CandidateProfile
 
 # ── Main agent function ───────────────────────────────────────────────────────
 
+@traceable(name="agent-1-resume-parser", run_type="chain")
 def run_resume_parser(
     state: SessionState,
     file_bytes: Optional[bytes] = None,

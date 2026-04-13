@@ -15,6 +15,9 @@ services:
       - APP_ENV=production
       - DATABASE_URL=postgresql://jobfinder:jobfinder@postgres:5432/jobfinder
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-autonomous-job-finder}
     depends_on:
       postgres:
         condition: service_healthy

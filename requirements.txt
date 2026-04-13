@@ -43,6 +43,7 @@ pydantic-settings>=2.3.0   # settings management via .env
 python-dotenv>=1.0.0    # .env file loading
 tenacity>=8.3.0         # retry logic with exponential backoff
 structlog>=24.2.0       # structured JSON logging
+langsmith>=0.7.0        # LLM tracing and observability
 
 # ── MLOps (Upgrade Layer 4) ───────────────────────────────────────────────────
 # mlflow>=2.14.0        # uncomment when monitoring layer is built
