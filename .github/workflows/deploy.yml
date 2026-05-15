@@ -1,0 +1,138 @@
+# .github/workflows/deploy.yml
+#
+# CI/CD pipeline: build both Docker images, push to ECR, deploy to EC2.
+#
+# Trigger: every push to main.
+#
+# Required GitHub Secrets:
+#   AWS_ACCESS_KEY_ID       — IAM user key (ECR push + ECR get-login-password)
+#   AWS_SECRET_ACCESS_KEY   — IAM user secret
+#   AWS_REGION              — e.g. ap-south-1
+#   ECR_REGISTRY            — e.g. 123456789012.dkr.ecr.ap-south-1.amazonaws.com
+#   EC2_HOST                — Elastic IP or hostname of the EC2 instance
+#   EC2_USER                — SSH login user (e.g. ubuntu or ec2-user)
+#   EC2_SSH_KEY             — contents of the PEM private key (not a path)
+#
+# Two ECR repositories must exist before the first run:
+#   job-finder-api
+#   job-finder-streamlit
+
+name: Build, Push & Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+
+  # ── Job 1: build both images and push to ECR ─────────────────────────────
+  build-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build both targets from the same Dockerfile.
+      # Layer cache is shared between the two builds via GitHub Actions cache,
+      # so the shared base-runtime stage is only built once.
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: api-runtime
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/job-finder-api:${{ github.sha }}
+            ${{ secrets.ECR_REGISTRY }}/job-finder-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Streamlit image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: streamlit-runtime
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/job-finder-streamlit:${{ github.sha }}
+            ${{ secrets.ECR_REGISTRY }}/job-finder-streamlit:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 2: SSH into EC2 and restart with the new images ──────────────────
+  deploy:
+    name: Deploy to EC2
+    needs: build-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Fetch a short-lived ECR token in CI so EC2 never needs its own AWS
+      # credentials — the token is passed as an env var over SSH.
+      - name: Get ECR login password
+        id: ecr-login-password
+        run: |
+          PASSWORD=$(aws ecr get-login-password --region ${{ secrets.AWS_REGION }})
+          echo "::add-mask::$PASSWORD"
+          echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ECR_PASSWORD: ${{ steps.ecr-login-password.outputs.password }}
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ECR_PASSWORD,ECR_REGISTRY,IMAGE_TAG
+          script: |
+            set -e
+
+            # Authenticate Docker with ECR using the token from CI
+            echo "$ECR_PASSWORD" | docker login \
+              --username AWS \
+              --password-stdin \
+              "$ECR_REGISTRY"
+
+            cd ~/autonomous-job-finder
+
+            # Pull the images that were just pushed (tagged :latest)
+            docker compose -f docker-compose.prod.yml pull
+
+            # Restart all services with the new images; no rebuild on EC2
+            docker compose -f docker-compose.prod.yml up -d --no-build
+
+            # Free disk space — remove dangling images from previous deploys
+            docker image prune -f
+
+            echo "Deploy complete — SHA: $IMAGE_TAG"

@@ -1,53 +1,52 @@
-# Python
-__pycache__/
-*.py[cod]
+# Secrets -- never bake API keys into an image layer
+.env
+.env.*
+*.env
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__
+*.pyc
 *.pyo
 *.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
+.pytest_cache
+.mypy_cache
+.ruff_cache
 
-# Virtual environment
-.venv/
+# Test artefacts
+tests/
+htmlcov/
+.coverage
+coverage.xml
+
+# MLflow local run data (server uses a volume, not baked-in files)
+mlruns/
+mlartifacts/
+
+# Local virtual environments
+.venv
 venv/
 env/
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Git
-.git/
-.gitignore
-
-# Environment files — never bake secrets into image
-.env
-.env.*
-!.env.example
-
-# Docker files themselves
-Dockerfile
-docker-compose*.yml
-.dockerignore
-
-# OS
+# OS noise
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-logs/
+# Editor configs
+.vscode/
+.idea/
+*.swp
 
-# Local data
-*.db
-*.sqlite
+# Docs / markdown (not needed in image)
+*.md
+docs/
+
+# Dev-only compose files
+docker-compose.prod.yml
+
+# Node (if any frontend tooling is ever added)
+node_modules/

@@ -14,14 +14,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM python:3.11-slim AS runtime
+# ── Shared runtime base ───────────────────────────────────────────────────────
+FROM python:3.11-slim AS base-runtime
 
 WORKDIR /app
 
-# Runtime system deps only (libpq for psycopg2)
+# psycopg-binary bundles libpq so libpq5 is not strictly required,
+# but curl is needed for Docker health checks in both service targets.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,17 +32,33 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application source
 COPY . .
 
-# Create non-root user for security
+# Non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
     chown -R appuser:appuser /app
 USER appuser
 
-# Expose API port
+# ── FastAPI runtime ───────────────────────────────────────────────────────────
+FROM base-runtime AS api-runtime
+
 EXPOSE 8000
 
-# Health check — hits the /health endpoint every 30 seconds
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-# Start the FastAPI server
-CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--timeout-keep-alive", "120"]
+
+# ── Streamlit runtime ─────────────────────────────────────────────────────────
+FROM base-runtime AS streamlit-runtime
+
+EXPOSE 8501
+
+# Streamlit health endpoint (built-in since Streamlit 1.18)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+CMD ["streamlit", "run", "frontend/streamlit_app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--server.fileWatcherType=none"]

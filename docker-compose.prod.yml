@@ -1,0 +1,161 @@
+# docker-compose.prod.yml
+#
+# Production compose -- used on EC2.
+# Key differences from docker-compose.yml (dev):
+#   - No source volume mount (.:/app removed)
+#   - No --reload on uvicorn
+#   - Streamlit and MLflow added as separate services
+#   - Nginx as the single external-facing entry point
+#   - Postgres port NOT exposed to host (internal network only)
+#   - Postgres password via POSTGRES_PASSWORD env var (set in .env on server)
+#   - MLflow tracking URI passed to API + Streamlit via MLFLOW_TRACKING_URI
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Required .env keys on the server (in addition to existing API keys):
+#   POSTGRES_PASSWORD=<strong-password>
+#   MLFLOW_TRACKING_URI=http://mlflow:5000
+#   API_BASE_URL=http://api:8000/api/v1   (consumed by Streamlit container)
+
+services:
+
+  # -- Nginx (single external entry point) ------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: job-finder-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Certbot directories -- populated after first SSL certificate issuance.
+      # Safe to mount even when empty; nginx will ignore missing cert files
+      # until the HTTP-only server block is replaced by Certbot.
+      - ./docker/certbot/conf:/etc/letsencrypt:ro
+      - ./docker/certbot/www:/var/www/certbot:ro
+    depends_on:
+      - api
+      - streamlit
+    restart: unless-stopped
+    networks:
+      - jobfinder-net
+
+  # -- FastAPI (pipeline orchestration + REST API) ----------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api-runtime
+    image: ${ECR_REGISTRY}/job-finder-api:latest
+    container_name: job-finder-api
+    env_file:
+      - .env
+    environment:
+      - APP_ENV=production
+      - DATABASE_URL=postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-autonomous-job-finder}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - jobfinder-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # -- Streamlit (frontend UI) ------------------------------------------------
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: streamlit-runtime
+    image: ${ECR_REGISTRY}/job-finder-streamlit:latest
+    container_name: job-finder-streamlit
+    environment:
+      # Server-side calls from Streamlit -> FastAPI use the Docker service name.
+      - API_BASE_URL=http://api:8000/api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - jobfinder-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+
+  # -- PostgreSQL (LangGraph checkpointer + session store + MLflow backend) ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: job-finder-postgres
+    environment:
+      POSTGRES_USER: jobfinder
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: jobfinder
+    # Port intentionally NOT exposed to host -- reachable only within
+    # jobfinder-net. Connect from EC2 host via:
+    #   docker exec -it job-finder-postgres psql -U jobfinder -d jobfinder
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - jobfinder-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobfinder -d jobfinder"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # -- MLflow tracking server -------------------------------------------------
+  # Uses the same Postgres instance for its own metadata tables (separate
+  # schema from LangGraph). Artifacts stored in a named Docker volume.
+  # Accessible via Nginx at /mlflow/.
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: job-finder-mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
+      --default-artifact-root /mlflow/artifacts
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - jobfinder-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  postgres_data:
+    driver: local
+  mlflow_artifacts:
+    driver: local
+
+networks:
+  jobfinder-net:
+    driver: bridge

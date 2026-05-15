@@ -1,5 +1,5 @@
 """
-frontend/app.py
+frontend/streamlit_app.py
 
 Autonomous Job Finder  Streamlit Frontend
 
@@ -10,15 +10,20 @@ Single-file app with step-based navigation:
 
 Talks to the FastAPI backend at API_BASE_URL via httpx.
 All state persisted in st.session_state across reruns.
+
+API_BASE_URL is read from the environment so the same image works both
+locally (default: http://localhost:8000/api/v1) and in Docker Compose
+production (API_BASE_URL=http://api:8000/api/v1).
 """
 
+import os
 import time
 import httpx
 import streamlit as st
 
 #  Config
 
-API_BASE_URL  = "http://localhost:8000/api/v1"
+API_BASE_URL  = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 POLL_INTERVAL = 2
 MAX_POLLS     = 75   # 150s ceiling — avoids collision with uvicorn timeout-keep-alive=120s
 

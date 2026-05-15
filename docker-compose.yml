@@ -12,7 +12,7 @@ services:
 
       dockerfile: Dockerfile
 
-      target: runtime
+      target: api-runtime
 
     container_name: job-finder-api
 
