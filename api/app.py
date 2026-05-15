@@ -78,13 +78,22 @@ async def lifespan(app: FastAPI):
     from api.dependencies import get_graph
     try:
         graph = get_graph()
-        # If using AsyncPostgresSaver, open pool and create tables
+        # If using AsyncPostgresSaver, open pool and create tables.
+        # setup() runs CREATE INDEX CONCURRENTLY which cannot run inside a
+        # transaction block (psycopg3 pool default). We open a dedicated
+        # autocommit connection just for the migration step.
         checkpointer = getattr(graph, "checkpointer", None)
         if checkpointer and hasattr(checkpointer, "_pool"):
             pool = checkpointer._pool
             await pool.open()
             logger.info("[app] Async connection pool opened")
-            await checkpointer.setup()
+            import psycopg
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            database_url = os.getenv("DATABASE_URL", "")
+            async with await psycopg.AsyncConnection.connect(
+                database_url, autocommit=True
+            ) as setup_conn:
+                await AsyncPostgresSaver(setup_conn).setup()
             logger.info("[app] Postgres checkpoint tables ready")
         logger.info("LangGraph pipeline ready.")
     except Exception as e:

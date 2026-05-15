@@ -126,6 +126,9 @@ jobs:
 
             cd ~/autonomous-job-finder
 
+            # Sync latest config files (docker-compose.prod.yml, nginx.conf, etc.)
+            git pull origin main
+
             # Pull the images that were just pushed (tagged :latest)
             docker compose -f docker-compose.prod.yml pull
 
