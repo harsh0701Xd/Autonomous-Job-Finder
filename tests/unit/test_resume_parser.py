@@ -1,8 +1,8 @@
 """
 tests/unit/test_resume_parser.py
 
-Unit tests for Agent 1 — Resume Parser.
-All Claude API calls are mocked — no real API calls in unit tests.
+Unit tests for Agent 1 -- Resume Parser.
+All Claude API calls are mocked -- no real API calls in unit tests.
 """
 
 import json
@@ -21,7 +21,7 @@ from agents.parser.resume_parser import (
 from core.state.session_state import SessionState, UserPreferences
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 @pytest.fixture
 def session() -> SessionState:
@@ -103,7 +103,7 @@ def sample_parsed_json() -> dict:
     }
 
 
-# ── Text cleaning tests ───────────────────────────────────────────────────────
+# -- Text cleaning tests -------------------------------------------------------
 
 class TestCleanJsonResponse:
     def test_strips_markdown_fences(self):
@@ -123,7 +123,7 @@ class TestCleanJsonResponse:
         assert clean_json_response(raw) == '{"key": "value"}'
 
 
-# ── JSON parsing tests ────────────────────────────────────────────────────────
+# -- JSON parsing tests --------------------------------------------------------
 
 class TestParseProfileFromJson:
     def test_parses_complete_profile(self, sample_parsed_json, sample_resume_text):
@@ -175,12 +175,12 @@ class TestParseProfileFromJson:
             "notable_projects": [],
             "career_gaps": [],
         }
-        # skills key missing entirely — should default to empty
+        # skills key missing entirely -- should default to empty
         profile = parse_profile_from_json(json.dumps(data), sample_resume_text)
         assert profile.skills.technical == []
 
 
-# ── Agent orchestration tests ─────────────────────────────────────────────────
+# -- Agent orchestration tests -------------------------------------------------
 
 class TestRunResumeParser:
     def test_successful_parse_from_text(

@@ -22,8 +22,8 @@ class APIError(BaseModel):
 # ── POST /sessions ────────────────────────────────────────────────────────────
 
 class CreateSessionRequest(BaseModel):
-    location: str = Field(..., description="Preferred job location, e.g. 'Bangalore' or 'Remote'")
-    work_type: Literal["remote", "hybrid", "on-site", "any"] = "any"
+    location: Optional[str] = Field(None, description="Preferred job location, e.g. 'Bangalore'. Null for remote.")
+    work_type: Literal["office", "remote", "hybrid", "on-site", "any"] = "any"
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
 
 
@@ -110,35 +110,44 @@ class JobResult(BaseModel):
     apply_url: str
     source: str
     posted_date: Optional[str] = None
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
     matched_via: list[str] = Field(default_factory=list)
-    fit_score: float
-    gap_skills: list[str] = Field(default_factory=list)
-    recommended_action: str
+    matched_profile: str = ""
+
+    # Composite score
+    fit_score: float = 0.0
+
+    # Sub-scores
+    experience_score: float = 0.0
+    skill_score: float = 0.0
+    domain_score: float = 0.0
+    recency_score: float = 0.0
+    education_score: Optional[float] = None
+    education_required: bool = False
+
+    # Scoring notes and gap analysis
+    scoring_notes: str = ""
+    experience_gap: Optional[str] = None
+    skill_gaps: list[str] = Field(default_factory=list)
+    domain_gap: Optional[str] = None
+    education_gap: Optional[str] = None
 
 
 class HiringSignalResult(BaseModel):
-    company:              str
-    signal_type:          str
-    signal_strength:      Literal["high", "medium", "low"]
-    summary:              str
-    is_positive:          bool = True
-    confidence:           float = 0.5
-    source_url:           str = ""
-    source_date:          Optional[str] = None
-    source_name:          str = ""
-    jobs_you_matched:     int = 0
-    relevant_to_profiles: list[str] = Field(default_factory=list)
+    company: str
+    signal_type: str
+    signal_strength: Literal["high", "medium", "low"]
+    summary: str
+    source_url: str
+    source_date: str
+    hiring_momentum_score: float
 
 
 class ResultsResponse(BaseModel):
-    session_id:      str
-    total_jobs:      int
-    jobs:            list[JobResult]
-    hiring_signals:  list[HiringSignalResult] = Field(default_factory=list)
-    watch_list:      list[HiringSignalResult] = Field(default_factory=list)
-    message:         str
+    session_id: str
+    total_jobs: int
+    jobs: list[JobResult]
+    watch_list: list[HiringSignalResult] = Field(default_factory=list)
+    message: str
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

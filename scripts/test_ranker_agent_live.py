@@ -1,7 +1,7 @@
 """
 scripts/test_ranker_agent_live.py
 
-Live integration test for Agent 4 — Ranker + Dedup.
+Live integration test for Agent 4 -- Ranker + Dedup.
 Runs Agent 3 (real API calls) then pipes output through Agent 4.
 Shows ranked job results with fit scores.
 
@@ -27,7 +27,7 @@ from agents.ranker.ranker_agent import run_ranker_agent
 
 async def main():
     print("\n" + "="*60)
-    print("  Agent 4 — Ranker Live Integration Test")
+    print("  Agent 4 -- Ranker Live Integration Test")
     print("="*60)
 
     session = SessionState(
@@ -98,15 +98,15 @@ async def main():
 
     # Display results
     print("\n" + "="*60)
-    print(f"  Top {len(session.ranked_jobs)} Jobs — Ranked by Fit Score")
+    print(f"  Top {len(session.ranked_jobs)} Jobs -- Ranked by Fit Score")
     print("="*60)
 
     for i, job in enumerate(session.ranked_jobs, 1):
         action_icons = {
-            "apply_now":       "✓ APPLY NOW",
+            "apply_now":       " APPLY NOW",
             "apply_with_note": "~ Apply with note",
-            "monitor":         "○ Monitor",
-            "skip":            "✗ Skip",
+            "monitor":         " Monitor",
+            "skip":            " Skip",
         }
         action = action_icons.get(job.recommended_action, job.recommended_action)
 

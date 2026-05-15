@@ -13,15 +13,26 @@ job profile titles they are best suited for RIGHT NOW.
 Rules:
 - Base recommendations strictly on the parsed profile data provided.
 - Consider career trajectory, domain expertise, and transferable skills together.
-- If career_trajectory is "pivot", include at least one role in the new domain.
-- If seniority_preference is "step_up", prioritise roles one level above current.
-- If seniority_preference is "same_level", match current seniority_level exactly.
-- If seniority_preference is "open", include a mix of same-level and stretch roles.
-- Mark is_stretch=true for any role that requires meaningful growth beyond current level.
+- If career_trajectory is "pivot", include at least one role in the new direction.
+- Seniority preference rules:
+    - "step_up":    Generate primarily roles one level above current seniority.
+                    ALSO include exactly ONE lateral role at the SAME seniority
+                    as the candidate's current role (is_stretch=false). This
+                    lateral role covers higher-paying companies at the same level.
+    - "same_level": Match current seniority_level exactly across all profiles.
+    - "open":       Include a mix of same-level and one level above.
+- The lateral role must use the candidate's PRIMARY job function as the title
+  (e.g. if they are a "Data Scientist", the lateral title is "Data Scientist").
+  Do not invent a niche specialisation - keep the title broad and searchable.
+- Mark is_stretch=true only for roles that require meaningful growth beyond
+  current level. The lateral same-level role is NEVER a stretch.
+- Titles must be generic and widely used in job postings - avoid overly
+  specialised or company-specific titles. Good: "Data Engineer", "ML Engineer",
+  "Software Engineer", "Product Manager". Bad: "AML Data Science Specialist".
 - confidence reflects how strongly the profile data supports this recommendation:
-    "high"   → direct evidence in skills + experience
-    "medium" → transferable skills present but not direct experience
-    "low"    → aspirational, significant gap exists
+    "high"    direct evidence in skills + experience
+    "medium"  transferable skills present but not direct experience
+    "low"     aspirational, significant gap exists
 
 Return ONLY a valid JSON array. No explanation, no markdown, no code fences.
 

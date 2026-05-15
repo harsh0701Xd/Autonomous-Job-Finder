@@ -1,7 +1,7 @@
 """
 agents/recommender/profile_recommender.py
 
-Agent 2 — Profile Recommender
+Agent 2 -- Profile Recommender
 
 Responsibility:
   - Read candidate_profile + user preferences from SessionState
@@ -10,7 +10,7 @@ Responsibility:
   - Set awaiting_confirmation = True to trigger the human-in-the-loop gate
 
 The LangGraph interrupt() gate lives in the graph layer (graph.py), not here.
-This agent's job is purely: profile → suggestions. Clean separation.
+This agent's job is purely: profile -> suggestions. Clean separation.
 
 Input  (from SessionState): candidate_profile, preferences
 Output (to SessionState)  : suggested_profiles, awaiting_confirmation=True
@@ -22,10 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Optional
 
 import anthropic
-from langsmith import traceable
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.prompts.recommender_prompts import (
@@ -33,17 +33,18 @@ from core.prompts.recommender_prompts import (
     PROFILE_RECOMMEND_PROMPT,
 )
 from core.state.session_state import SessionState, SuggestedProfile, UserPreferences
+from core.config.config_loader import cfg
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS   = 1024
+_CFG         = cfg.profile_recommender
+CLAUDE_MODEL = _CFG.model
+MAX_TOKENS   = _CFG.max_tokens
 MIN_PROFILES = 2
 MAX_PROFILES = 5
 
 
-# ── Formatting helpers ────────────────────────────────────────────────────────
-
+# -- Formatting helpers --------------------------------------------------------
 
 def _profile_to_prompt_json(state: SessionState) -> str:
     """
@@ -52,29 +53,24 @@ def _profile_to_prompt_json(state: SessionState) -> str:
     """
     profile = state.candidate_profile
     data = {
-        "current_title":     profile.current_title,
-        "years_experience":  profile.years_experience,
-        "seniority_level":   profile.seniority_level,
-        "skills":            profile.skills.model_dump(),
-        "domain_expertise":  profile.domain_expertise,
-        "career_trajectory": profile.career_trajectory,
-        "pivot_signals":     profile.pivot_signals,
+        "current_title":              profile.current_title,
+        "years_experience_full_time": profile.years_experience_full_time,
+        "years_experience_other":     profile.years_experience_other,
+        "seniority_level":            profile.seniority_level,
+        "skills":                     profile.skills.model_dump(),
+        "domain_expertise":           profile.domain_expertise,
+        "career_trajectory":          profile.career_trajectory,
+        "pivot_signals":              profile.pivot_signals,
+        "ats_summary":                profile.ats_summary,
         "work_experience": [
             {
-                "title":          exp.title,
-                "company":        exp.company,
-                "duration_months": exp.duration_months,
-                "impact_signals": exp.impact_signals,
+                "title":           exp.title,
+                "company":         exp.company,
+                "role_type":        exp.role_type,
+                "duration_months":  exp.duration_months,
+                "impact_signals":   exp.impact_signals,
             }
             for exp in profile.work_experience
-        ],
-        "notable_projects": [
-            {
-                "name":        proj.name,
-                "description": proj.description,
-                "tech_used":   proj.tech_used,
-            }
-            for proj in profile.notable_projects
         ],
         "education": [
             {
@@ -95,55 +91,43 @@ def _profile_to_prompt_json(state: SessionState) -> str:
     return json.dumps(data, indent=2)
 
 
-# ── LLM call ─────────────────────────────────────────────────────────────────
+# -- LLM call -----------------------------------------------------------------
 
-@traceable(
-    name="claude-profile-recommender",
-    run_type="llm",
-    metadata={"model": CLAUDE_MODEL, "agent": "profile_recommender"},
-)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     reraise=True,
 )
-def _call_claude(prompt: str) -> str:
-    """Call Claude and return the raw response string."""
+def _call_claude(prompt: str) -> tuple[str, dict]:
+    """
+    Call Claude and return (raw_text, usage_dict).
+
+    usage_dict has keys 'input' and 'output' for token counts. Returns zeros
+    if the SDK response shape changes -- caller should treat as best-effort.
+    """
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
+        temperature=_CFG.temperature,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text.strip()
+    text = response.content[0].text.strip()
+    usage = getattr(response, "usage", None)
+    tokens = {
+        "input":  getattr(usage, "input_tokens",  0) if usage else 0,
+        "output": getattr(usage, "output_tokens", 0) if usage else 0,
+    }
+    return text, tokens
 
 
-# ── Response parsing ──────────────────────────────────────────────────────────
+# -- Response parsing ----------------------------------------------------------
 
 def _clean_response(raw: str) -> str:
-    """
-    Strip markdown fences, preamble, or leading whitespace from LLM response.
-    Finds the first [ and last ] to extract the JSON array even if Claude
-    adds text before or after the array.
-    """
+    """Strip markdown fences if Claude added them despite instructions."""
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\s*```$",          "", raw, flags=re.MULTILINE)
-    raw = raw.strip()
-
-    # Extract JSON array boundaries
-    start = raw.find("[")
-    end   = raw.rfind("]") + 1
-
-    if start != -1 and end > start:
-        return raw[start:end]
-
-    # Fallback: maybe it returned a single object instead of array
-    start = raw.find("{")
-    end   = raw.rfind("}") + 1
-    if start != -1 and end > start:
-        return "[" + raw[start:end] + "]"
-
-    return raw
+    return raw.strip()
 
 
 def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
@@ -177,7 +161,7 @@ def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
             )
             profiles.append(profile)
         except (KeyError, ValueError) as e:
-            logger.warning(f"Skipping malformed profile item {i}: {e} — {item}")
+            logger.warning(f"Skipping malformed profile item {i}: {e} -- {item}")
             continue
 
     if len(profiles) < MIN_PROFILES:
@@ -187,10 +171,62 @@ def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
         )
 
     # Cap at MAX_PROFILES
-    return profiles[:MAX_PROFILES]
+    profiles = profiles[:MAX_PROFILES]
+
+    # Deduplicate by canonical title (#13).
+    # "ML Engineer" and "Machine Learning Engineer" resolve to the same
+    # canonical and would produce near-identical search results -- keep the
+    # higher-confidence one and drop the duplicate.
+    profiles = _dedup_by_canonical(profiles)
+
+    return profiles
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+_CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+def _dedup_by_canonical(profiles: list[SuggestedProfile]) -> list[SuggestedProfile]:
+    """
+    Collapse profiles whose titles map to the same canonical search term.
+
+    Uses cfg.title_canonical_map (from llm_config.yaml). Titles not in the
+    map are treated as their own canonical (pass-through). When two profiles
+    share a canonical, the higher-confidence one is kept; on a tie, the first
+    (lower-index) profile wins. Domain-agnostic.
+    """
+    canonical_map = cfg.title_canonical_map  # dict alias -> canonical
+    seen: dict[str, SuggestedProfile] = {}
+
+    for profile in profiles:
+        canonical_key = canonical_map.get(profile.title, profile.title).lower()
+        existing = seen.get(canonical_key)
+        if existing is None:
+            seen[canonical_key] = profile
+        else:
+            # Keep the higher-confidence profile
+            if (
+                _CONFIDENCE_RANK.get(profile.confidence, 0)
+                > _CONFIDENCE_RANK.get(existing.confidence, 0)
+            ):
+                logger.info(
+                    "[profile_recommender] Dedup: '%s' supersedes '%s' "
+                    "(both -> '%s', %s > %s)",
+                    profile.title, existing.title, canonical_key,
+                    profile.confidence, existing.confidence,
+                )
+                seen[canonical_key] = profile
+            else:
+                logger.info(
+                    "[profile_recommender] Dedup: '%s' dropped "
+                    "(same canonical as '%s' -> '%s', %s >= %s)",
+                    profile.title, existing.title, canonical_key,
+                    existing.confidence, profile.confidence,
+                )
+
+    return list(seen.values())
+
+
+# -- Validation ---------------------------------------------------------------
 
 def _validate_preconditions(state: SessionState) -> Optional[str]:
     """
@@ -214,71 +250,96 @@ def _validate_preconditions(state: SessionState) -> Optional[str]:
     )
     if not has_skills and not profile.current_title:
         return (
-            "Candidate profile appears empty — no skills or title found. "
+            "Candidate profile appears empty -- no skills or title found. "
             "Resume parsing may have partially failed."
         )
 
     return None
 
 
-# ── Main agent function ───────────────────────────────────────────────────────
+# -- Main agent function -------------------------------------------------------
 
-@traceable(name="agent-2-profile-recommender", run_type="chain")
 def run_profile_recommender(state: SessionState) -> SessionState:
     """
-    Agent 2 — Profile Recommender.
+    Agent 2 -- Profile Recommender.
 
     Reads candidate_profile and preferences from state.
-    Calls Claude to generate 3–5 job profile suggestions.
+    Calls Claude to generate 3-5 job profile suggestions.
     Writes suggested_profiles to state and sets awaiting_confirmation=True.
 
     The actual LangGraph interrupt() pause happens in graph.py, not here.
-    This agent only produces the suggestions — the graph decides when to pause.
+    This agent only produces the suggestions -- the graph decides when to pause.
+
+    Also records token usage, latency, and llm-call count into
+    state.agent_metrics["profile_recommender"] so the finalise node can
+    aggregate them into session-level cost/latency metrics. The pattern
+    matches parser, pruner, and ranker. Domain-agnostic.
 
     Returns updated SessionState.
     """
     state.current_agent = "profile_recommender"
-    logger.info(f"[profile_recommender] Starting — session_id={state.session_id}")
+    _t0 = time.perf_counter()
+    logger.info(f"[profile_recommender] Starting -- session_id={state.session_id}")
 
-    # ── Validate preconditions ───────────────────────────────────────────────
+    # Token accumulators. We may make 1 (primary) or 2 (primary + fallback)
+    # LLM calls; both contribute to the per-agent metrics record.
+    total_in_tok  = 0
+    total_out_tok = 0
+    llm_calls     = 0
+
+    def _record_metrics() -> None:
+        """Write per-agent metrics to state. Called on every exit path."""
+        elapsed = round(time.perf_counter() - _t0, 2)
+        state.agent_metrics["profile_recommender"] = {
+            "model":         CLAUDE_MODEL,
+            "input_tokens":  total_in_tok,
+            "output_tokens": total_out_tok,
+            "llm_calls":     llm_calls,
+            "latency_secs":  elapsed,
+        }
+
+    # -- Validate preconditions ------------------------------------------------
     error = _validate_preconditions(state)
     if error:
         state.error = error
         logger.error(f"[profile_recommender] Precondition failed: {error}")
+        _record_metrics()
         return state
 
     prefs = state.preferences
 
-    # ── Build prompt ─────────────────────────────────────────────────────────
+    # -- Build prompt ----------------------------------------------------------
     profile_json = _profile_to_prompt_json(state)
 
-    # Use .replace() not .format() — profile_json contains {} from JSON
-    # which breaks Python's str.format() with KeyError
-    prompt = (
-        PROFILE_RECOMMEND_PROMPT
-        .replace("{candidate_profile_json}", profile_json)
-        .replace("{location}",             prefs.location)
-        .replace("{work_type}",            prefs.work_type)
-        .replace("{seniority_preference}", prefs.seniority_preference)
+    prompt = PROFILE_RECOMMEND_PROMPT.format(
+        candidate_profile_json = profile_json,
+        location               = prefs.location,
+        work_type              = prefs.work_type,
+        seniority_preference   = prefs.seniority_preference,
     )
 
-    # ── LLM call + parse ─────────────────────────────────────────────────────
+    # -- LLM call + parse ------------------------------------------------------
     try:
-        raw = _call_claude(prompt)
+        raw, tok = _call_claude(prompt)
+        total_in_tok  += tok.get("input",  0)
+        total_out_tok += tok.get("output", 0)
+        llm_calls     += 1
         profiles = _parse_profiles(raw)
 
     except ValueError as e:
-        # Primary attempt failed — try fallback prompt
+        # Primary attempt failed -- try fallback prompt
         logger.warning(
             f"[profile_recommender] Primary attempt failed ({e}), trying fallback"
         )
         try:
-            fallback_prompt = (
-                PROFILE_RECOMMEND_FALLBACK_PROMPT
-                .replace("{candidate_profile_json}", profile_json)
-                .replace("{seniority_preference}",   prefs.seniority_preference)
+            fallback_prompt = PROFILE_RECOMMEND_FALLBACK_PROMPT.format(
+                candidate_profile_json = profile_json,
+                seniority_preference   = prefs.seniority_preference,
             )
-            raw = _call_claude(fallback_prompt)
+            raw, tok = _call_claude(fallback_prompt)
+            total_in_tok  += tok.get("input",  0)
+            total_out_tok += tok.get("output", 0)
+            llm_calls     += 1
             profiles = _parse_profiles(raw)
 
         except Exception as fallback_err:
@@ -288,14 +349,16 @@ def run_profile_recommender(state: SessionState) -> SessionState:
             logger.error(
                 f"[profile_recommender] Fallback also failed: {fallback_err}"
             )
+            _record_metrics()
             return state
 
     except Exception as e:
         state.error = f"Unexpected error in profile recommender: {e}"
         logger.error(f"[profile_recommender] Unexpected error: {e}")
+        _record_metrics()
         return state
 
-    # ── Write to state ───────────────────────────────────────────────────────
+    # -- Write to state --------------------------------------------------------
     state.suggested_profiles   = profiles
     state.awaiting_confirmation = True
     state.error                = None
@@ -303,15 +366,19 @@ def run_profile_recommender(state: SessionState) -> SessionState:
     high_conf  = [p for p in profiles if p.confidence == "high"]
     stretch    = [p for p in profiles if p.is_stretch]
 
+    _record_metrics()
+
     logger.info(
-        f"[profile_recommender] Success — "
+        f"[profile_recommender] Success -- "
         f"{len(profiles)} profiles suggested, "
         f"{len(high_conf)} high confidence, "
-        f"{len(stretch)} stretch roles"
+        f"{len(stretch)} stretch roles | "
+        f"tokens={total_in_tok}in/{total_out_tok}out | "
+        f"calls={llm_calls}"
     )
     for p in profiles:
         logger.debug(
-            f"  → [{p.confidence}] {p.title} "
+            f"  -> [{p.confidence}] {p.title} "
             f"({p.seniority_target})"
             f"{' [stretch]' if p.is_stretch else ''}"
         )
@@ -319,7 +386,7 @@ def run_profile_recommender(state: SessionState) -> SessionState:
     return state
 
 
-# ── User confirmation handler ─────────────────────────────────────────────────
+# -- User confirmation handler ------------------------------------------------
 
 def apply_user_confirmation(
     state: SessionState,
@@ -383,7 +450,7 @@ def apply_user_confirmation(
     state.awaiting_confirmation = False
 
     logger.info(
-        f"[profile_recommender] Confirmation applied — "
+        f"[profile_recommender] Confirmation applied -- "
         f"{len(confirmed)} profiles confirmed "
         f"({len(custom_profiles or [])} user-custom)"
     )

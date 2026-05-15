@@ -1,8 +1,8 @@
 """
 tests/unit/test_profile_recommender.py
 
-Unit tests for Agent 2 — Profile Recommender.
-All Claude API calls are mocked — no real API calls in unit tests.
+Unit tests for Agent 2 -- Profile Recommender.
+All Claude API calls are mocked -- no real API calls in unit tests.
 """
 
 import json
@@ -13,7 +13,6 @@ import pytest
 
 from agents.recommender.profile_recommender import (
     _clean_response,
-    _format_salary_range,
     _parse_profiles,
     _validate_preconditions,
     apply_user_confirmation,
@@ -30,7 +29,7 @@ from core.state.session_state import (
 )
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 @pytest.fixture
 def preferences() -> UserPreferences:
@@ -38,9 +37,6 @@ def preferences() -> UserPreferences:
         location="Bangalore",
         work_type="remote",
         seniority_preference="step_up",
-        salary_min=3200000,
-        salary_max=5000000,
-        currency="INR",
     )
 
 
@@ -115,33 +111,7 @@ def sample_profiles_json() -> str:
     ])
 
 
-# ── Formatting tests ──────────────────────────────────────────────────────────
-
-class TestFormatSalaryRange:
-    def test_formats_full_range(self):
-        prefs = UserPreferences(
-            location="Bangalore",
-            salary_min=3200000,
-            salary_max=5000000,
-            currency="INR",
-        )
-        result = _format_salary_range(prefs)
-        assert "3,200,000" in result
-        assert "5,000,000" in result
-        assert "INR" in result
-
-    def test_formats_min_only(self):
-        prefs = UserPreferences(location="Delhi", salary_min=80000, currency="USD")
-        result = _format_salary_range(prefs)
-        assert "80,000+" in result
-
-    def test_formats_not_specified(self):
-        prefs = UserPreferences(location="Mumbai")
-        result = _format_salary_range(prefs)
-        assert result == "not specified"
-
-
-# ── Response cleaning tests ───────────────────────────────────────────────────
+# -- Response cleaning tests ---------------------------------------------------
 
 class TestCleanResponse:
     def test_strips_json_fence(self):
@@ -153,7 +123,7 @@ class TestCleanResponse:
         assert _clean_response(raw) == raw
 
 
-# ── Profile parsing tests ─────────────────────────────────────────────────────
+# -- Profile parsing tests -----------------------------------------------------
 
 class TestParseProfiles:
     def test_parses_valid_profiles(self, sample_profiles_json):
@@ -191,7 +161,7 @@ class TestParseProfiles:
     def test_raises_on_non_array(self):
         # _clean_response wraps single objects in [] so they become
         # a 1-item list. The array check passes but profile validation
-        # fails — ends up as "Too few valid profiles".
+        # fails -- ends up as "Too few valid profiles".
         with pytest.raises(ValueError, match="Too few valid profiles"):
             _parse_profiles('{"title": "DS"}')
 
@@ -220,7 +190,7 @@ class TestParseProfiles:
         assert profiles[1].title == "MLE"
 
 
-# ── Precondition validation tests ─────────────────────────────────────────────
+# -- Precondition validation tests ---------------------------------------------
 
 class TestValidatePreconditions:
     def test_passes_with_complete_state(self, session):
@@ -252,7 +222,7 @@ class TestValidatePreconditions:
         assert "empty" in result.lower()
 
 
-# ── Agent orchestration tests ─────────────────────────────────────────────────
+# -- Agent orchestration tests -------------------------------------------------
 
 class TestRunProfileRecommender:
     def test_successful_recommendation(self, session, sample_profiles_json):
@@ -322,7 +292,7 @@ class TestRunProfileRecommender:
         assert result.session_id == original_id
 
 
-# ── Confirmation handler tests ────────────────────────────────────────────────
+# -- Confirmation handler tests ------------------------------------------------
 
 class TestApplyUserConfirmation:
     @pytest.fixture

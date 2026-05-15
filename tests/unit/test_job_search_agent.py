@@ -1,8 +1,8 @@
 """
 tests/unit/test_job_search_agent.py
 
-Unit tests for Agent 3 — Job Search Agent.
-All HTTP calls are mocked — no real API calls in unit tests.
+Unit tests for Agent 3 -- Job Search Agent.
+All HTTP calls are mocked -- no real API calls in unit tests.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from agents.job_search.normalizer import (
     normalize_remoteok,
     _make_job_id,
     _parse_date,
-    _extract_salary,
 )
 from agents.job_search.sources.jsearch import _build_query
 from agents.job_search.job_search_agent import (
@@ -33,7 +32,7 @@ from core.state.session_state import (
 )
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 @pytest.fixture
 def session() -> SessionState:
@@ -76,8 +75,6 @@ def sample_jsearch_job() -> dict:
         "job_description":             "We are looking for a Senior DS...",
         "job_apply_link":              "https://accenture.com/apply/123",
         "job_posted_at_datetime_utc":  "2024-01-15T10:00:00Z",
-        "job_min_salary":              1500000,
-        "job_max_salary":              2500000,
         "job_employment_type":         "FULLTIME",
         "job_is_remote":               False,
     }
@@ -92,14 +89,12 @@ def sample_remoteok_job() -> dict:
         "url":         "https://remoteok.com/jobs/123456",
         "description": "Remote ML Engineer role...",
         "date":        "2024-01-15T10:00:00Z",
-        "salary_min":  "80000",
-        "salary_max":  "120000",
         "tags":        ["machine-learning", "python"],
         "location":    "Remote",
     }
 
 
-# ── Normalizer helper tests ───────────────────────────────────────────────────
+# -- Normalizer helper tests ---------------------------------------------------
 
 class TestNormalizerHelpers:
     def test_make_job_id_format(self):
@@ -117,20 +112,7 @@ class TestNormalizerHelpers:
     def test_parse_date_invalid(self):
         assert _parse_date("not-a-date") is None
 
-    def test_extract_salary_int(self):
-        assert _extract_salary(1500000) == 1500000
-
-    def test_extract_salary_string(self):
-        assert _extract_salary("80000") == 80000
-
-    def test_extract_salary_none(self):
-        assert _extract_salary(None) is None
-
-    def test_extract_salary_malformed(self):
-        assert _extract_salary("N/A") is None
-
-
-# ── JSearch normalizer tests ──────────────────────────────────────────────────
+# -- JSearch normalizer tests --------------------------------------------------
 
 class TestNormalizeJSearch:
     def test_normalizes_complete_job(self, sample_jsearch_job):
@@ -142,8 +124,6 @@ class TestNormalizeJSearch:
         assert result.source == "jsearch"
         assert result.apply_url == "https://accenture.com/apply/123"
         assert result.matched_profile == "Senior Data Scientist"
-        assert result.salary_min == 1500000
-        assert result.salary_max == 2500000
 
     def test_remote_job_work_type(self, sample_jsearch_job):
         sample_jsearch_job["job_is_remote"] = True
@@ -164,7 +144,7 @@ class TestNormalizeJSearch:
         assert len(result.jd_text) <= 3000
 
 
-# ── RemoteOK normalizer tests ─────────────────────────────────────────────────
+# -- RemoteOK normalizer tests -------------------------------------------------
 
 class TestNormalizeRemoteOK:
     def test_normalizes_complete_job(self, sample_remoteok_job):
@@ -184,13 +164,7 @@ class TestNormalizeRemoteOK:
         result = normalize_remoteok({"position": "MLE"}, "MLE")
         assert result is None
 
-    def test_salary_parsed_from_string(self, sample_remoteok_job):
-        result = normalize_remoteok(sample_remoteok_job, "MLE")
-        assert result.salary_min == 80000
-        assert result.salary_max == 120000
-
-
-# ── normalize_jobs dispatcher tests ──────────────────────────────────────────
+# -- normalize_jobs dispatcher tests ------------------------------------------
 
 class TestNormalizeJobs:
     def test_dispatches_to_correct_normalizer(self, sample_jsearch_job):
@@ -213,7 +187,7 @@ class TestNormalizeJobs:
         assert len(results) == 2
 
 
-# ── Source activation logic ───────────────────────────────────────────────────
+# -- Source activation logic ---------------------------------------------------
 
 class TestSourceActivation:
     def test_remoteok_on_for_remote_work_type(self):
@@ -229,7 +203,7 @@ class TestSourceActivation:
         assert _should_include_remoteok("on-site", "London") is False
 
 
-# ── Agent orchestration tests ─────────────────────────────────────────────────
+# -- Agent orchestration tests -------------------------------------------------
 
 class TestRunJobSearchAgent:
     def test_successful_search_populates_raw_jobs(self, session, sample_jsearch_job):
@@ -248,7 +222,7 @@ class TestRunJobSearchAgent:
                    side_effect=mock_remoteok):
             result = asyncio.run(run_job_search_agent(session))
 
-        # 1 job × 2 profiles = 2 raw jobs
+        # 1 job x 2 profiles = 2 raw jobs
         assert len(result.raw_jobs) == 2
         assert result.error is None
         assert result.current_agent == "job_search"
@@ -298,8 +272,6 @@ class TestRunJobSearchAgent:
                 "job_description": "Job desc",
                 "job_apply_link": f"https://example.com/{i}",
                 "job_posted_at_datetime_utc": None,
-                "job_min_salary": None,
-                "job_max_salary": None,
                 "job_is_remote": False,
             }
             for i in range(100)

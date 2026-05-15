@@ -4,7 +4,7 @@ tests/unit/test_api_routes.py
 Unit tests for the FastAPI route handlers and dependency logic.
 
 Strategy:
-  - Dependencies (graph, agents) are mocked — no real pipeline runs
+  - Dependencies (graph, agents) are mocked -- no real pipeline runs
   - Uses FastAPI TestClient for endpoint tests
   - Pure logic helpers (session store, status derivation) tested directly
 """
@@ -37,7 +37,7 @@ from core.state.session_state import (
 )
 
 
-# ── App fixture ───────────────────────────────────────────────────────────────
+# -- App fixture ---------------------------------------------------------------
 
 @pytest.fixture
 def client():
@@ -53,7 +53,7 @@ def clear_session_store():
     _session_store.clear()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 def _make_session(prefs: dict | None = None) -> str:
     sid = generate_session_id()
@@ -61,9 +61,6 @@ def _make_session(prefs: dict | None = None) -> str:
         "location": "Bangalore",
         "work_type": "remote",
         "seniority_preference": "step_up",
-        "salary_min": None,
-        "salary_max": None,
-        "currency": "USD",
     })
     return sid
 
@@ -106,7 +103,7 @@ def _resume_bytes(content: str = "Sample resume content " * 20) -> bytes:
     return content.encode("utf-8")
 
 
-# ── Session store unit tests ──────────────────────────────────────────────────
+# -- Session store unit tests --------------------------------------------------
 
 class TestSessionStore:
     def test_generate_session_id_is_unique(self):
@@ -140,7 +137,7 @@ class TestSessionStore:
         assert "updated_at" in record
 
 
-# ── File validation constants ─────────────────────────────────────────────────
+# -- File validation constants -------------------------------------------------
 
 class TestFileValidationConstants:
     def test_pdf_allowed(self):
@@ -159,7 +156,7 @@ class TestFileValidationConstants:
         assert "txt" not in ALLOWED_EXTENSIONS
 
 
-# ── Status derivation logic ───────────────────────────────────────────────────
+# -- Status derivation logic ---------------------------------------------------
 
 def _derive(pc, err, pf, ac, cp, rj, rr, rrt, cand, ss="created"):
     if pc: return "complete"
@@ -202,7 +199,7 @@ class TestDerivePipelineStatus:
         assert _derive(False,None,False,False,[],[],False,None,None,"created") == "created"
 
 
-# ── POST /sessions ────────────────────────────────────────────────────────────
+# -- POST /sessions ------------------------------------------------------------
 
 class TestCreateSession:
     def test_returns_201(self, client):
@@ -236,7 +233,7 @@ class TestCreateSession:
         assert sid in _session_store
 
 
-# ── POST /sessions/{id}/resume ────────────────────────────────────────────────
+# -- POST /sessions/{id}/resume ------------------------------------------------
 
 class TestUploadResume:
     def _upload(self, client, session_id, content=None,
@@ -282,7 +279,7 @@ class TestUploadResume:
         r = self._upload(client, sid, content=big)
         # Newer Starlette versions return 400 for oversized multipart bodies
         # before the route handler runs; older versions let it through and we
-        # return 413. Accept either — both mean "file rejected as too large".
+        # return 413. Accept either -- both mean "file rejected as too large".
         assert r.status_code in (400, 413)
 
     def test_successful_upload_returns_awaiting_confirmation(self, client):
@@ -328,7 +325,7 @@ class TestUploadResume:
         assert r.json()["status"] == "parse_failed"
 
 
-# ── POST /sessions/{id}/confirm ───────────────────────────────────────────────
+# -- POST /sessions/{id}/confirm -----------------------------------------------
 
 class TestConfirmProfiles:
     def _confirm(self, client, session_id, selected, custom=None):
@@ -387,7 +384,7 @@ class TestConfirmProfiles:
         assert r.status_code == 422
 
 
-# ── GET /sessions/{id}/status ─────────────────────────────────────────────────
+# -- GET /sessions/{id}/status -------------------------------------------------
 
 class TestGetStatus:
     def test_unknown_session_returns_404(self, client):
@@ -423,7 +420,7 @@ class TestGetStatus:
         assert len(body["suggested_profiles"]) == 2
 
 
-# ── GET /health ───────────────────────────────────────────────────────────────
+# -- GET /health ---------------------------------------------------------------
 
 class TestHealth:
     def test_health_returns_200(self, client):

@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
-# Load .env before anything else — must happen before any os.getenv() calls
+# Load .env before anything else -- must happen before any os.getenv() calls
 load_dotenv()
 
 from fastapi import FastAPI, Request, status
@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 
 from api.routes import router
 
-# ── Logging setup ─────────────────────────────────────────────────────────────
+# -- Logging setup -------------------------------------------------------------
 
 logging.basicConfig(
     stream  = sys.stdout,
@@ -40,7 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ── Lifespan ──────────────────────────────────────────────────────────────────
+# -- Lifespan ------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,6 +50,19 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Starting Autonomous Job Finder API...")
 
+    # -- LangSmith dev isolation -----------------------------------------------
+    # In dev: use a per-day project name so dev traces don't pollute production.
+    # In production: use LANGCHAIN_PROJECT env var (set in cloud config).
+    import os
+    from datetime import date
+    app_env = os.getenv("APP_ENV", "development")
+    if app_env == "development" and not os.getenv("LANGCHAIN_PROJECT"):
+        dev_project = f"dev-{date.today().isoformat()}"
+        os.environ["LANGCHAIN_PROJECT"] = dev_project
+        logger.info(f"[app] LangSmith project set to '{dev_project}' (dev isolation)")
+    elif os.getenv("LANGCHAIN_PROJECT"):
+        logger.info(f"[app] LangSmith project: '{os.getenv('LANGCHAIN_PROJECT')}'")
+
     # Validate required environment variables upfront
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -58,7 +71,7 @@ async def lifespan(app: FastAPI):
             "Add it to your .env file and restart the server."
         )
     elif not api_key.startswith("sk-ant-"):
-        logger.warning("ANTHROPIC_API_KEY looks malformed — double-check your .env file.")
+        logger.warning("ANTHROPIC_API_KEY looks malformed -- double-check your .env file.")
     else:
         logger.info("ANTHROPIC_API_KEY loaded OK.")
 
@@ -82,7 +95,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Autonomous Job Finder API.")
 
 
-# ── App factory ───────────────────────────────────────────────────────────────
+# -- App factory ---------------------------------------------------------------
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -98,7 +111,7 @@ def create_app() -> FastAPI:
         redoc_url   = "/redoc",
     )
 
-    # ── CORS ─────────────────────────────────────────────────────────────────
+    # -- CORS -----------------------------------------------------------------
     # In development, allow all origins.
     # In production, restrict to your frontend domain.
     allowed_origins = (
@@ -115,17 +128,17 @@ def create_app() -> FastAPI:
         allow_headers     = ["*"],
     )
 
-    # ── Root redirect → docs ─────────────────────────────────────────────────
+    # -- Root redirect -> docs -------------------------------------------------
     from fastapi.responses import RedirectResponse
 
     @app.get("/", include_in_schema=False)
     async def root():
         return RedirectResponse(url="/docs")
 
-    # ── Routes ───────────────────────────────────────────────────────────────
+    # -- Routes ---------------------------------------------------------------
     app.include_router(router, prefix="/api/v1", tags=["pipeline"])
 
-    # ── Global exception handlers ─────────────────────────────────────────
+    # -- Global exception handlers -----------------------------------------
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
         logger.error(f"Unhandled exception on {request.url}: {exc}", exc_info=True)
@@ -140,12 +153,12 @@ def create_app() -> FastAPI:
     return app
 
 
-# ── App instance ──────────────────────────────────────────────────────────────
+# -- App instance --------------------------------------------------------------
 
 app = create_app()
 
 
-# ── Dev runner ────────────────────────────────────────────────────────────────
+# -- Dev runner ----------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

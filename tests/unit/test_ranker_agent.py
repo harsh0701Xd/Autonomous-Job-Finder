@@ -1,8 +1,8 @@
 """
 tests/unit/test_ranker_agent.py
 
-Unit tests for Agent 4 — Ranker + Deduplication Agent.
-No external API calls — pure logic testing.
+Unit tests for Agent 4 -- Ranker + Deduplication Agent.
+No external API calls -- pure logic testing.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from core.state.session_state import (
 )
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 @pytest.fixture
 def candidate_profile() -> CandidateProfile:
@@ -128,7 +128,7 @@ def session(candidate_profile, confirmed_profiles) -> SessionState:
     )
 
 
-# ── Deduplication tests ───────────────────────────────────────────────────────
+# -- Deduplication tests -------------------------------------------------------
 
 class TestDeduplication:
     def test_removes_exact_duplicates(self):
@@ -180,7 +180,7 @@ class TestDeduplication:
         assert "much longer" in result[0].jd_text
 
 
-# ── Semantic scoring tests ────────────────────────────────────────────────────
+# -- Semantic scoring tests ----------------------------------------------------
 
 class TestSemanticScore:
     def test_high_score_on_matching_jd(self, candidate_profile):
@@ -210,7 +210,7 @@ class TestSemanticScore:
         assert 0.0 <= score <= 1.0
 
 
-# ── Seniority scoring tests ───────────────────────────────────────────────────
+# -- Seniority scoring tests ---------------------------------------------------
 
 class TestSeniorityScore:
     def test_perfect_match_senior(self, candidate_profile, confirmed_profiles):
@@ -234,7 +234,7 @@ class TestSeniorityScore:
         assert 0.0 <= score <= 1.0
 
 
-# ── Recency scoring tests ─────────────────────────────────────────────────────
+# -- Recency scoring tests -----------------------------------------------------
 
 class TestRecencyScore:
     def test_fresh_job_scores_high(self):
@@ -256,7 +256,7 @@ class TestRecencyScore:
         assert _recency_score(job) == 0.5
 
 
-# ── Recommended action tests ──────────────────────────────────────────────────
+# -- Recommended action tests --------------------------------------------------
 
 class TestRecommendedAction:
     def test_high_score_apply_now(self):
@@ -272,7 +272,7 @@ class TestRecommendedAction:
         assert _recommended_action(0.20) == "skip"
 
 
-# ── Gap skills tests ──────────────────────────────────────────────────────────
+# -- Gap skills tests ----------------------------------------------------------
 
 class TestGapSkills:
     def test_identifies_missing_skills(self, candidate_profile):
@@ -300,7 +300,7 @@ class TestGapSkills:
         assert len(gaps) <= 5
 
 
-# ── Full rank_jobs tests ──────────────────────────────────────────────────────
+# -- Full rank_jobs tests ------------------------------------------------------
 
 class TestRankJobs:
     def test_returns_ranked_job_objects(
@@ -345,7 +345,7 @@ class TestRankJobs:
         assert len(result[0].matched_via) >= 1
 
 
-# ── Full agent orchestration tests ────────────────────────────────────────────
+# -- Full agent orchestration tests --------------------------------------------
 
 class TestRunRankerAgent:
     def test_successful_ranking(self, session):

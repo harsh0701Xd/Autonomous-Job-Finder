@@ -17,10 +17,11 @@ nosetests.xml
 coverage.xml
 *.cover
 *.log
-.git
+.gitS
 .mypy_cache
 .pytest_cache
 .hypothesis
+mlruns/
 
 # IDE
 .vscode/

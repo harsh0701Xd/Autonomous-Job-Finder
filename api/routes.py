@@ -18,8 +18,7 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
-
-from agents.parser.resume_parser import extract_text
+from fastapi.responses import JSONResponse
 
 from api.dependencies import (
     create_session_record,
@@ -41,6 +40,7 @@ from api.models import (
     ResultsResponse,
     SuggestedProfileResponse,
 )
+from langgraph.types import Command
 from core.state.session_state import SessionState, UserPreferences
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ async def create_session(body: CreateSessionRequest) -> CreateSessionResponse:
 async def upload_resume(
     session_id:       str,
     background_tasks: BackgroundTasks,
-    file:             UploadFile = File(..., description="Resume file (PDF or DOCX, max 5MB)"),
+    file:             UploadFile = File(..., description="Resume file (PDF or DOCX only, max 5MB; legacy .doc not supported)"),
 ) -> ResumeUploadResponse:
     """
     Step 2: Upload the resume file.
@@ -155,16 +155,20 @@ async def upload_resume(
         preferences       = preferences,
     ).model_dump()
 
-    # Extract text before entering the graph
+    # Store raw file bytes under a key the graph node can access
+    # We pass them directly into the initial state as a special key
+    # The parse node reads from resume_raw_text OR file bytes
+    # Here we trigger extraction immediately before graph entry
+    from agents.parser.resume_parser import extract_text
     try:
         raw_text = extract_text(file_bytes, file_ext)
         initial_state["resume_raw_text"] = raw_text
-    except Exception as e:
+    except ValueError as e:
         update_session_status(session_id, "parse_failed")
         return ResumeUploadResponse(
-            session_id           = session_id,
-            status               = "parse_failed",
-            message              = "Could not extract text from the uploaded file.",
+            session_id          = session_id,
+            status              = "parse_failed",
+            message             = str(e),
             parse_failure_reason = str(e),
         )
 
@@ -173,32 +177,16 @@ async def upload_resume(
 
     # Run graph until it hits the confirmation interrupt
     graph = get_graph()
-    config = {
-        "configurable": {"thread_id": session_id},
-        "run_name": f"parse-and-recommend | {session_id[:8]}",
-        "tags": ["parse", "recommend", "phase-1"],
-        "metadata": {
-            "session_id":  session_id,
-            "location":    prefs_data.get("location"),
-            "work_type":   prefs_data.get("work_type"),
-            "resume_file": file.filename,
-        },
-    }
+    config = {"configurable": {"thread_id": session_id}}
 
     try:
         final_state_dict = await graph.ainvoke(initial_state, config=config)
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(
-            f"[routes] Pipeline error for session {session_id}\n"
-            f"Type: {type(e).__name__} | Repr: {e!r}\n"
-            f"Traceback:\n{tb}"
-        )
+        logger.error(f"[routes] Pipeline error for session {session_id}: {e}")
         update_session_status(session_id, "error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Pipeline error: {type(e).__name__}: {e!r}",
+            detail=f"Pipeline error: {e}",
         )
 
     # Reconstruct state object from dict
@@ -245,29 +233,79 @@ async def upload_resume(
 
 
 # ── POST /sessions/{session_id}/confirm ──────────────────────────────────────
+#
+# NON-BLOCKING DESIGN:
+#   Returns HTTP 202 immediately. Pipeline runs as a BackgroundTask so
+#   the HTTP connection is never held open during the 45-90s ranker.
+#   Streamlit polls /status every 2s (already implemented) — zero frontend changes.
+#
+# PREVIOUS DESIGN (blocking):
+#   await graph.ainvoke(Command(resume=...))  ← held connection for ~90s
+#   Risk: uvicorn timeout-keep-alive=120s could drop the connection if
+#   ranker took longer than expected, silently losing results.
+
+async def _run_pipeline_in_background(
+    session_id:     str,
+    resume_payload: dict,
+    config:         dict,
+) -> None:
+    """
+    Resume the LangGraph pipeline from the confirmation interrupt.
+
+    Called as a BackgroundTask — the HTTP connection is already closed.
+    Results are written to Postgres via the checkpointer. Streamlit polls
+    /status until results_ready=true, then fetches /results.
+
+    On any exception: sets status="error" in Postgres so the poll loop
+    can surface it to the frontend via the existing error branch.
+    """
+    import traceback
+
+    logger.info(
+        f"[routes:bg] Pipeline resuming in background — session_id={session_id}"
+    )
+    graph = get_graph()
+
+    try:
+        await graph.ainvoke(
+            Command(resume=resume_payload),
+            config=config,
+        )
+        logger.info(
+            f"[routes:bg] Pipeline complete — session_id={session_id}"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"[routes:bg] Pipeline error for {session_id}\n"
+            f"Type: {type(e).__name__} | {e!r}\n"
+            f"{traceback.format_exc()}"
+        )
+        update_session_status(session_id, "error")
+
 
 @router.post(
     "/sessions/{session_id}/confirm",
-    response_model=ConfirmProfilesResponse,
+    status_code=202,
     summary="Submit user's profile confirmation and resume the pipeline",
 )
 async def confirm_profiles(
-    session_id: str,
-    body:       ConfirmProfilesRequest,
-) -> ConfirmProfilesResponse:
+    session_id:       str,
+    body:             ConfirmProfilesRequest,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
     """
     Step 3: User confirms which profiles to search for.
 
-    Resumes the LangGraph pipeline from the interrupt point.
-    The graph applies the confirmation and prepares for job search
-    (Agent 3 and beyond — Phase 2).
+    Returns HTTP 202 immediately. The pipeline (job search → url pruner →
+    ranker → finalise) runs as a BackgroundTask, completely decoupled from
+    this HTTP connection. The frontend polls GET /status for progress.
 
-    Returns the confirmed profiles so the frontend can show
-    what's being searched.
+    This eliminates the race condition where a slow ranker (~90s) could
+    collide with uvicorn's timeout-keep-alive=120s and drop the connection.
     """
     session_record = get_session_record(session_id)
 
-    # Validate session is in the right state
     current_status = session_record.get("status")
     if current_status != "awaiting_confirmation":
         raise HTTPException(
@@ -285,82 +323,39 @@ async def confirm_profiles(
             detail="At least one profile title must be selected or provided.",
         )
 
-    graph = get_graph()
-    config = {
-        "configurable": {"thread_id": session_id},
-        "run_name": f"search-rank-signals | {session_id[:8]}",
-        "tags": ["search", "rank", "signals", "phase-2"],
-        "metadata": {
-            "session_id":        session_id,
-            "selected_profiles": body.selected_titles,
-            "custom_profiles":   body.custom_profiles,
-            "total_profiles":    len(body.selected_titles) + len(body.custom_profiles),
-        },
-    }
-
-    # Resume the graph from the interrupt point using LangGraph Command
-    # The graph paused at user_confirmation node — we resume by passing
-    # the user's selection as the interrupt resume value via Command
-    from langgraph.types import Command
+    config = {"configurable": {"thread_id": session_id}}
 
     resume_payload = {
         "selected_titles": body.selected_titles,
         "custom_profiles": body.custom_profiles,
     }
 
-    try:
-        final_state_dict = await graph.ainvoke(
-            Command(resume=resume_payload),
-            config=config,
-        )
-    except Exception as e:
-        import traceback
-        logger.error(
-            f"[routes] Resume error for session {session_id}\n"
-            f"Type: {type(e).__name__} | Repr: {e!r}\n"
-            f"Traceback:\n{traceback.format_exc()}"
-        )
-        update_session_status(session_id, "error")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Pipeline resume error: {type(e).__name__}: {e!r}",
-        )
-
-    # Fetch full state from checkpointer and reconstruct SessionState
-    try:
-        checkpoint = await graph.aget_state(config)
-        state_dict = checkpoint.values if checkpoint else {}
-        final_state = SessionState(**state_dict)
-    except Exception as e:
-        logger.error(f"[routes] State reconstruction error: {e}", exc_info=True)
-        final_state = SessionState(
-            session_id=session_id,
-            confirmed_profiles=[],
-        )
-
-    if final_state.error:
-        update_session_status(session_id, "error")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=final_state.error,
-        )
-
+    # Set status immediately so /status shows "searching" before first poll
     update_session_status(session_id, "searching")
-    confirmed = [_profile_to_response(p) for p in final_state.confirmed_profiles]
 
-    logger.info(
-        f"[routes] Confirmation applied for {session_id} — "
-        f"{len(confirmed)} profiles confirmed"
+    # Fire the pipeline — returns before it runs
+    background_tasks.add_task(
+        _run_pipeline_in_background,
+        session_id=session_id,
+        resume_payload=resume_payload,
+        config=config,
     )
 
-    return ConfirmProfilesResponse(
-        session_id         = session_id,
-        status             = "confirmed",
-        confirmed_profiles = confirmed,
-        message            = (
-            f"Confirmed {len(confirmed)} profile(s). "
-            f"Job search will begin shortly."
-        ),
+    logger.info(
+        f"[routes] Confirmation received for {session_id} — "
+        f"pipeline queued as BackgroundTask | profiles={body.selected_titles}"
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "session_id": session_id,
+            "status":     "pipeline_started",
+            "message":    (
+                f"Confirmed {len(body.selected_titles)} profile(s). "
+                f"Job search started. Poll /status for progress."
+            ),
+        },
     )
 
 
@@ -404,6 +399,27 @@ async def get_status(session_id: str) -> PipelineStatus:
     state = SessionState(**state_dict)
     pipeline_status = _derive_pipeline_status(state, session_record)
 
+    # Empty-results case: distinguish "nothing came back from job sources" from
+    # "everything got filtered by the experience-score floor" so the user gets
+    # an actionable message instead of just "Done! Found 0 matching jobs."
+    if pipeline_status == "complete" and len(state.ranked_jobs) == 0:
+        if not state.raw_jobs:
+            complete_msg = (
+                "No jobs were returned from the search APIs for your selected "
+                "profiles. This usually means the API quota is exhausted for "
+                "this month, the profile titles are too narrow for your "
+                "location, or a job source is temporarily down. "
+                "Try broader profile titles or check your JSearch API quota."
+            )
+        else:
+            complete_msg = (
+                f"Searched {len(state.raw_jobs)} jobs but none passed the "
+                f"experience-fit threshold for your profile. Try selecting "
+                f"different profile titles or relax the seniority filter."
+            )
+    else:
+        complete_msg = f"Done! Found {len(state.ranked_jobs)} matching jobs."
+
     status_messages = {
         "created":               "Session ready. Upload your resume to begin.",
         "parsing":               "Parsing your resume...",
@@ -411,7 +427,7 @@ async def get_status(session_id: str) -> PipelineStatus:
         "awaiting_confirmation": "Profiles ready. Waiting for your selection.",
         "searching":             "Searching job boards across your selected profiles...",
         "ranking":               "Ranking and deduplicating results...",
-        "complete":              f"Done! Found {len(state.ranked_jobs)} matching jobs.",
+        "complete":              complete_msg,
         "error":                 f"An error occurred: {state.error}",
     }
 
@@ -442,7 +458,7 @@ async def get_results(session_id: str) -> ResultsResponse:
     Only available once the pipeline has completed (results_ready=True).
     Poll /status first to know when results are ready.
     """
-    get_session_record(session_id)  # validates session exists
+    session_record = get_session_record(session_id)  # validates session exists
     graph = get_graph()
     config = {"configurable": {"thread_id": session_id}}
 
@@ -463,7 +479,8 @@ async def get_results(session_id: str) -> ResultsResponse:
 
     state = SessionState(**state_dict)
 
-    if not state.results_ready and not state.ranked_jobs:
+    pipeline_status = _derive_pipeline_status(state, session_record)
+    if pipeline_status not in ("complete", "ranking", "searching") and not state.results_ready and not state.ranked_jobs:
         raise HTTPException(
             status_code=status.HTTP_425_TOO_EARLY,
             detail="Results not ready yet. Poll /status for progress.",
@@ -480,43 +497,58 @@ async def get_results(session_id: str) -> ResultsResponse:
             apply_url          = j.apply_url,
             source             = j.source,
             posted_date        = j.posted_date.isoformat() if j.posted_date else None,
-            salary_min         = j.salary_min,
-            salary_max         = j.salary_max,
             matched_via        = j.matched_via,
-            fit_score          = round(j.fit_score, 3),
-            gap_skills         = j.gap_skills,
-            recommended_action = j.recommended_action,
+            matched_profile    = j.matched_profile,
+            fit_score          = round(j.fit_score,          3),
+            experience_score   = round(j.experience_score,   3),
+            skill_score        = round(j.skill_score,        3),
+            domain_score       = round(j.domain_score,       3),
+            recency_score      = round(j.recency_score,      3),
+            education_score    = round(j.education_score, 3) if j.education_score is not None else None,
+            education_required = j.education_required,
+            scoring_notes      = j.scoring_notes,
+            experience_gap     = j.experience_gap,
+            skill_gaps         = j.skill_gaps,
+            domain_gap         = j.domain_gap,
+            education_gap      = j.education_gap,
         )
         for j in state.ranked_jobs
     ]
 
-    # Map hiring signals (anchored to ranked results)
-    def _signal_to_response(s) -> HiringSignalResult:
-        return HiringSignalResult(
-            company              = s.company,
-            signal_type          = s.signal_type,
-            signal_strength      = s.signal_strength,
-            summary              = s.summary,
-            is_positive          = s.is_positive,
-            confidence           = round(s.confidence, 3),
-            source_url           = s.source_url or "",
-            source_date          = s.source_date.isoformat() if s.source_date else None,
-            source_name          = s.source_name or "",
-            jobs_you_matched     = s.jobs_you_matched,
-            relevant_to_profiles = s.relevant_to_profiles,
+    # Map hiring signals
+    watch_list = []
+    for s in state.hiring_signals:
+        from api.models import HiringSignalResult
+        watch_list.append(HiringSignalResult(
+            company                = s.company,
+            signal_type            = s.signal_type,
+            signal_strength        = s.signal_strength,
+            summary                = s.summary,
+            source_url             = s.source_url,
+            source_date            = s.source_date.isoformat(),
+            hiring_momentum_score  = round(s.hiring_momentum_score, 3),
+        ))
+
+    if jobs:
+        msg = f"Found {len(jobs)} matching jobs across your selected profiles."
+    elif not state.raw_jobs:
+        msg = (
+            "No jobs were returned from the search APIs. Likely an exhausted "
+            "API quota or transient source outage -- try again later or with "
+            "broader profile titles."
+        )
+    else:
+        msg = (
+            f"Searched {len(state.raw_jobs)} jobs but none passed the "
+            f"experience-fit threshold for your profile."
         )
 
-    from api.models import HiringSignalResult
-    hiring_signals = [_signal_to_response(s) for s in state.hiring_signals]
-    watch_list     = [_signal_to_response(s) for s in state.watch_list]
-
     return ResultsResponse(
-        session_id      = session_id,
-        total_jobs      = len(jobs),
-        jobs            = jobs,
-        hiring_signals  = hiring_signals,
-        watch_list      = watch_list,
-        message         = f"Found {len(jobs)} matching jobs across your selected profiles.",
+        session_id  = session_id,
+        total_jobs  = len(jobs),
+        jobs        = jobs,
+        watch_list  = watch_list,
+        message     = msg,
     )
 
 

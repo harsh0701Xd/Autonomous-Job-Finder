@@ -1,7 +1,7 @@
 """
 scripts/test_signals_agent_live.py
 
-Live integration test for Agent 5 — Hiring Signals Agent.
+Live integration test for Agent 5 -- Hiring Signals Agent.
 Runs Agents 3 + 4 + 5 in sequence using real API calls.
 
 Usage:
@@ -27,7 +27,7 @@ from agents.signals.signals_agent import run_signals_agent
 
 async def main():
     print("\n" + "="*60)
-    print("  Agent 5 — Hiring Signals Live Integration Test")
+    print("  Agent 5 -- Hiring Signals Live Integration Test")
     print("="*60)
 
     session = SessionState(
@@ -96,12 +96,12 @@ async def main():
 
     # Step 3: Signals
     print("\nStep 3: Fetching hiring signals (Agent 5)...")
-    print("  (This may take 10-20 seconds — fetching from NewsAPI + RSS feeds)")
+    print("  (This may take 10-20 seconds -- fetching from NewsAPI + RSS feeds)")
     session = await run_signals_agent(session)
 
     # Display results
     print("\n" + "="*60)
-    print(f"  Hiring Signals — {len(session.hiring_signals)} found")
+    print(f"  Hiring Signals -- {len(session.hiring_signals)} found")
     print("="*60)
 
     if session.hiring_signals:
@@ -128,7 +128,7 @@ async def main():
 
     # Watch list
     print(f"\n{'='*60}")
-    print(f"  Watch List — {len(session.watch_list)} proactive signals")
+    print(f"  Watch List -- {len(session.watch_list)} proactive signals")
     print("="*60)
 
     if session.watch_list:

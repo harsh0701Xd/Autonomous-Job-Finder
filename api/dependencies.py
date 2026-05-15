@@ -22,13 +22,17 @@ from fastapi import HTTPException, UploadFile, status
 
 logger = logging.getLogger(__name__)
 
-# ── Allowed file types ────────────────────────────────────────────────────────
+#  Allowed file types
+# NOTE: legacy ".doc" (CFB / Word 97-2003) is intentionally NOT supported --
+# python-docx only handles the modern OOXML ".docx" container. Convert .doc
+# to .docx (Word: File > Save As, or `libreoffice --convert-to docx`) before
+# uploading.
 
-ALLOWED_EXTENSIONS = {"pdf", "docx", "doc"}
+ALLOWED_EXTENSIONS = {"pdf", "docx"}
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
-# ── LangGraph singleton ───────────────────────────────────────────────────────
+#  LangGraph singleton 
 
 _graph = None
 
@@ -53,10 +57,10 @@ def get_graph():
     return _graph
 
 
-# ── In-memory session metadata store ─────────────────────────────────────────
+#  In-memory session metadata store 
 # Stores lightweight metadata per session_id.
 # In production this would be a Redis hash or Postgres row.
-# The full pipeline state lives in LangGraph's checkpointer —
+# The full pipeline state lives in LangGraph's checkpointer 
 # this store only tracks things the API layer needs (status, created_at).
 
 _session_store: dict[str, dict] = {}
@@ -92,8 +96,24 @@ def get_session_record(session_id: str) -> dict:
 def update_session_status(session_id: str, new_status: str) -> None:
     """Update the status field of an existing session record."""
     if session_id in _session_store:
-        _session_store[session_id]["status"] = new_status
+        _session_store[session_id]["status"]     = new_status
         _session_store[session_id]["updated_at"] = datetime.utcnow().isoformat()
+
+
+def save_session_metrics(session_id: str, metrics: dict) -> None:
+    """
+    Persist session_metrics payload to the in-memory session store.
+
+    In production this would write the JSONB payload to Postgres:
+        UPDATE sessions SET session_metrics = %s WHERE session_id = %s
+
+    For now we store it in the in-memory dict so the /metrics endpoint
+    can read it without needing a DB query.
+    """
+    if session_id in _session_store:
+        _session_store[session_id]["session_metrics"] = metrics
+        _session_store[session_id]["updated_at"]      = datetime.utcnow().isoformat()
+        logger.debug(f"[dependencies] session_metrics saved for {session_id[:8]}")
 
 
 def generate_session_id() -> str:
@@ -101,7 +121,7 @@ def generate_session_id() -> str:
     return str(uuid.uuid4())
 
 
-# ── File validation ───────────────────────────────────────────────────────────
+#  File validation 
 
 async def validate_resume_file(file: UploadFile) -> tuple[bytes, str]:
     """
@@ -120,13 +140,21 @@ async def validate_resume_file(file: UploadFile) -> tuple[bytes, str]:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
+        # Friendlier message for the common legacy-.doc case.
+        if ext == "doc":
+            detail = (
+                "Legacy .doc files are not supported. "
+                "Please re-save your resume as .docx (Word: File > Save As > Word Document) "
+                "or upload a PDF instead."
+            )
+        elif not ext:
+            detail = "File has no extension. Please upload a PDF or DOCX file."
+        else:
+            detail = (
                 f"Unsupported file type: '.{ext}'. "
-                f"Please upload a PDF or DOCX file."
-            ),
-        )
+                f"Only PDF and DOCX files are accepted."
+            )
+        raise HTTPException(status_code=422, detail=detail)
 
     # Read file bytes
     file_bytes = await file.read()

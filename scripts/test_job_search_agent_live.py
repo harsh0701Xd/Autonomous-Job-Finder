@@ -1,7 +1,7 @@
 """
 scripts/test_job_search_agent_live.py
 
-Live integration test for Agent 3 — Job Search Agent.
+Live integration test for Agent 3 -- Job Search Agent.
 Makes real API calls to JSearch and RemoteOK.
 Run this to verify Agent 3 is returning real job results
 before wiring it into the full pipeline.
@@ -27,7 +27,7 @@ import uuid
 
 async def main():
     print("\n" + "="*60)
-    print("  Job Search Agent — Live Integration Test")
+    print("  Job Search Agent -- Live Integration Test")
     print("="*60)
 
     # Build a test session matching your real confirmed profiles
@@ -60,7 +60,7 @@ async def main():
 
     print(f"\nSearching for {len(session.confirmed_profiles)} profiles:")
     for p in session.confirmed_profiles:
-        print(f"  → {p.title}")
+        print(f"  -> {p.title}")
     print(f"\nLocation : {session.preferences.location}")
     print(f"Work type: {session.preferences.work_type}")
     print("\nRunning job search...\n")
@@ -81,7 +81,7 @@ async def main():
         by_source.setdefault(job.source, []).append(job)
 
     for source, jobs in by_source.items():
-        print(f"\n[{source.upper()}] — {len(jobs)} jobs")
+        print(f"\n[{source.upper()}] -- {len(jobs)} jobs")
         print("-" * 40)
         for job in jobs[:3]:   # show first 3 per source
             print(f"  Title   : {job.title}")
@@ -89,8 +89,6 @@ async def main():
             print(f"  Location: {job.location}")
             print(f"  Profile : {job.matched_profile}")
             print(f"  Apply   : {job.apply_url[:60]}...")
-            if job.salary_min:
-                print(f"  Salary  : {job.salary_min:,} – {job.salary_max:,}")
             print()
 
     # Summary by matched profile
@@ -101,7 +99,7 @@ async def main():
                     if j.matched_profile == profile.title)
         print(f"  {profile.title}: {count} jobs")
 
-    print(f"\n  Total raw jobs → Agent 4 (ranker): {len(result.raw_jobs)}")
+    print(f"\n  Total raw jobs -> Agent 4 (ranker): {len(result.raw_jobs)}")
     print("="*60 + "\n")
 
 

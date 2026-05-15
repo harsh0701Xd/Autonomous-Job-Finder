@@ -40,7 +40,7 @@ try:
         print(f"Location  : {first.get('job_city')}, {first.get('job_country')}")
         print(f"Apply URL : {first.get('job_apply_link', 'N/A')[:60]}...")
     else:
-        print("No jobs returned — check your API key or query")
+        print("No jobs returned -- check your API key or query")
 
 except Exception as e:
     print(f"ERROR: {e}")

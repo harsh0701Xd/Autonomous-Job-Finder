@@ -1,0 +1,150 @@
+# core/config/llm_config.yaml
+#
+# All LLM parameters and scoring constants for the Autonomous Job Finder.
+# Edit here -- no code changes needed for tuning.
+
+# -- Resume Parser (Agent 2) ---------------------------------------------------
+resume_parser:
+  model:       claude-sonnet-4-6
+  max_tokens:  4096
+  temperature: 0.1
+  timeout_secs: 60
+  min_text_length: 200          # chars -- below this the resume is treated as a parse failure
+
+# -- Profile Recommender (Agent 2b) -------------------------------------------
+profile_recommender:
+  model:       claude-haiku-4-5-20251001
+  max_tokens:  1024
+  temperature: 0.4
+  timeout_secs: 30
+
+# -- Job Search (Agent 3) ------------------------------------------------------
+job_search:
+  num_pages: 2                     # JSearch  → 20 jobs, 100 sessions/month
+  active_jobs_db_enabled: true
+  active_jobs_db_pages: 1          # Active Jobs DB → 10 jobs, 25 sessions/month
+  linkedin_jobs_enabled: true
+  linkedin_jobs_pages: 1           # LinkedIn → 10 jobs, 25 sessions/month
+  jobs_search_api_enabled: true
+  jobs_search_api_pages: 2         # Jobs Search API → 20 jobs, 50 sessions/month
+  techmap_enabled: false
+  techmap_pages: 0
+  min_jd_chars: 200             # chars gate -- JDs below this are dropped before ranking
+  min_jd_words: 60              # word gate  -- JDs below this are dropped before ranking
+  max_jd_chars: 8000            # truncation ceiling for JD text stored in raw_jobs
+  hours_old: 168                # Jobs Search API freshness window (hours). 168 = 7 days.
+
+
+# -- URL Pruner (Agent 5) ------------------------------------------------------
+url_pruner:
+  model:        claude-haiku-4-5-20251001
+  max_tokens:   1500
+  temperature:  0.1
+  timeout_secs: 30
+
+# -- Ranker (Agent 6) ----------------------------------------------------------
+ranker:
+  model:        claude-haiku-4-5-20251001
+  max_tokens:   4096
+  temperature:  0.1
+  timeout_secs: 30
+  semaphore_size: 4      # max concurrent LLM calls (shared across all sessions)
+  batch_size: 4          # jobs per asyncio.gather() call inside rank_jobs_async()
+  batch_delay_secs: 8.0  # sleep between batches to stay within Tier 1 RPM limit
+  recency_decay_days: 45 # kept for recency_score field; weight is 0.00
+
+  profile_caps:
+    rank_1: 30
+    rank_2: 20
+    rank_3: 10
+
+  # Minimum experience score (0.0–1.0) assigned by the ranker LLM.
+  # Jobs scoring below the applicable threshold are dropped from ranked_jobs output.
+  # The LLM scores experience on how well candidate years meets JD requirement:
+  #   1.0 = meets/exceeds | 0.8 = slight gap | 0.4 = large gap | 0.2 = severe gap
+  # Set to 0.0 to disable the filter entirely.
+  #
+  # Two thresholds — selected per session based on seniority_preference:
+  #   same_level  → min_experience_score_same   (stricter: candidate should be competitive)
+  #   step_up     → min_experience_score_step_up (lenient: experience gap is expected)
+  #
+  # Tuning guide:
+  #   0.3 → lenient  (keep most roles, drop only extreme mismatches like 15yr Director)
+  #   0.4 → default  (drop 5yr+ over-reaches, keep near-miss roles like 2yr gap)
+  #   0.5 → strict   (drop anything with a meaningful experience gap)
+  min_experience_score_same:    0.5
+  min_experience_score_step_up: 0.3
+
+  # Minimum title relevance score (0.0–1.0) assigned by the ranker LLM.
+  # Jobs scoring below this threshold are dropped from ranked_jobs output.
+  # The LLM scores how closely the actual job title matches the searched profile:
+  #   1.0 = exact/near-exact match (e.g. "Senior ML Engineer" for "ML Engineer")
+  #   0.8 = functionally equivalent phrasing ("Applied ML Engineer")
+  #   0.6 = closely related but distinct ("AI Research Engineer", "Deep Learning Eng")
+  #   0.4 = same broad family, different role ("Data Scientist" for "ML Engineer")
+  #   0.2 = adjacent field, significant divergence ("Data Engineer", "Analytics Eng")
+  #   0.0 = unrelated title ("Network Engineer", "Product Manager")
+  # Set to 0.0 to disable the filter entirely.
+  # Tuning guide:
+  #   0.3 → lenient  (keep adjacent roles, drop only completely unrelated titles)
+  #   0.5 → default  (drop "Data Scientist" when searched "ML Engineer")
+  #   0.7 → strict   (keep only near-exact or equivalent title matches)
+  min_title_relevance: 0.5
+
+  # ── Sparse JD detection ───────────────────────────────────────────────────
+  # JDs that are very short pass the normalizer's 60-word drop gate but still
+  # lack enough content for reliable LLM scoring. These produce inflated scores
+  # (experience=1.0, skill=1.0) because Claude finds no contradicting evidence.
+  #
+  # sparse_jd_word_threshold: JDs with fewer words than this are flagged as
+  #   sparse_jd=True and their fit_score is capped at sparse_jd_fit_score_cap.
+  #   Set to 0 to disable detection entirely.
+  #
+  # sparse_jd_fit_score_cap: Maximum fit_score a sparse JD can receive.
+  #   Prevents near-empty listings from appearing at the top of results.
+  #   Set to 1.0 to disable capping (flag only, no cap).
+  sparse_jd_word_threshold: 150
+  sparse_jd_fit_score_cap:  0.75
+
+  # ── Ranker weights ────────────────────────────────────────────────────────
+  # Each weight set MUST sum to 1.0 — config_loader.py validates this on load
+  # and refuses to start the app on mismatch. recency is kept in the schema
+  # for UI display but always weighted 0.00 in the actual fit_score formula.
+
+  # Weights WITH explicit education requirement in JD
+  # fit_score = 0.40*experience + 0.30*skill + 0.20*domain + 0.10*education
+  weights_with_education:
+    experience: 0.40
+    skill:      0.30
+    domain:     0.20
+    recency:    0.00   # displayed in UI, not used in scoring
+    education:  0.10
+
+  # Weights WITHOUT explicit education requirement in JD
+  # fit_score = 0.50*experience + 0.30*skill + 0.20*domain
+  weights_without_education:
+    experience: 0.50
+    skill:      0.30
+    domain:     0.20
+    recency:    0.00   # displayed in UI, not used in scoring
+
+# -- Signals Classifier (Agent 7) ---------------------------------------------
+signals_classifier:
+  model:        claude-haiku-4-5-20251001
+  max_tokens:   1024
+  temperature:  0.1
+  timeout_secs: 30
+
+# -- Title Canonical Map -------------------------------------------------------
+# Maps alias title strings -> canonical search title.
+# Used in TWO places:
+#   1. Profile Recommender (Agent 2b): deduplicates suggested profiles whose
+#      titles resolve to the same canonical (keeps higher-confidence one).
+#   2. Job Search (Agent 3): normalises the search query before hitting APIs,
+#      so variant titles resolve to the preferred search form (more results).
+#
+# Empty by default -- domain-agnostic, operator-populated.
+# Add entries for your candidate's field as needed. Example entry:
+#   "Alias Title": "Canonical Search Title"
+# Case-sensitive. Titles not in the map pass through unchanged.
+title_canonical_map: {}

@@ -1,24 +1,31 @@
 """
 core/graph.py
 
-LangGraph pipeline graph — the orchestration layer.
+LangGraph pipeline graph -- the orchestration layer.
 
-Wires all agents as graph nodes and defines the transitions between them.
-The human-in-the-loop confirmation gate lives here as a LangGraph interrupt.
-
-Current graph (Phase 1):
+Current pipeline:
   START
-    → parse_resume
-    → recommend_profiles
-    → [INTERRUPT: awaiting_user_confirmation]
-    → apply_confirmation
-    → END   (Agents 3–6 will extend from here in Phase 2)
+    -> parse_resume          (Agent 1 -- Resume Parser, Claude Sonnet)
+    -> recommend_profiles    (Agent 2 -- Profile Recommender, Claude Haiku)
+    -> [INTERRUPT: user_confirmation]
+    -> search_jobs           (Agent 3 -- Job Search, JSearch API)
+    -> prune_urls            (Agent 4 -- URL Pruner, Claude Haiku)
+    -> rank_results          (Agent 6 -- Ranker, Claude Haiku x 60 jobs)
+    -> END
+
+Hiring signals agent (Option A -- disconnected):
+  Code preserved in agents/signals/. Removed from active graph due to
+  low signal reliability for Indian mid-market companies and sparse
+  NewsAPI coverage. Reinstate by adding node + edge when a better
+  data source is available.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -31,14 +38,15 @@ from agents.recommender.profile_recommender import (
     run_profile_recommender,
 )
 from agents.job_search.job_search_agent import node_job_search
+from agents.pruner.url_pruner import node_url_pruner
 from agents.ranker.ranker_agent import node_ranker
-from agents.signals.signals_agent import node_signals
+# agents.signals intentionally not imported -- Option A (disconnected, code preserved)
 from core.state.session_state import SessionState
 
 logger = logging.getLogger(__name__)
 
 
-# ── Node functions ────────────────────────────────────────────────────────────
+# -- Node functions ------------------------------------------------------------
 # Each node receives the full state dict, calls the agent, returns updated fields.
 # LangGraph merges returned fields back into the state automatically.
 
@@ -55,7 +63,7 @@ def node_recommend_profiles(state: dict) -> dict:
 
     # Skip if parsing failed upstream
     if session.parse_failed:
-        logger.warning("[graph] Skipping profile recommendation — parse failed")
+        logger.warning("[graph] Skipping profile recommendation -- parse failed")
         return state
 
     updated = run_profile_recommender(session)
@@ -70,7 +78,7 @@ def node_user_confirmation(state: dict) -> dict:
     to the checkpointer. The graph resumes when the API layer calls
     graph.invoke() again with the user's confirmation payload in the state.
 
-    The interrupt payload is the list of suggested profile titles — sent to
+    The interrupt payload is the list of suggested profile titles -- sent to
     the frontend so the user can see what they're confirming.
     """
     session = SessionState(**state)
@@ -78,19 +86,19 @@ def node_user_confirmation(state: dict) -> dict:
     # If an error occurred upstream, skip the gate
     if session.error:
         logger.warning(
-            f"[graph] Skipping confirmation gate — upstream error: {session.error}"
+            f"[graph] Skipping confirmation gate -- upstream error: {session.error}"
         )
         return state
 
     suggested_titles = [p.title for p in session.suggested_profiles]
 
     logger.info(
-        f"[graph] Interrupting for user confirmation — "
+        f"[graph] Interrupting for user confirmation -- "
         f"{len(suggested_titles)} profiles to confirm"
     )
 
     # This call pauses execution. The value passed to interrupt() is available
-    # to the caller as the interrupt payload — use it to drive the frontend UI.
+    # to the caller as the interrupt payload -- use it to drive the frontend UI.
     user_input = interrupt({
         "action":   "confirm_profiles",
         "profiles": [p.model_dump() for p in session.suggested_profiles],
@@ -110,29 +118,125 @@ def node_user_confirmation(state: dict) -> dict:
     return updated.model_dump()
 
 
-# ── Conditional edge: should we proceed after parsing? ────────────────────────
+# -- Conditional edge: should we proceed after parsing? ------------------------
 
 def route_after_parse(state: dict) -> str:
-    """
-    After parsing, route to recommender if successful, else END.
-    """
     if state.get("parse_failed"):
-        logger.info("[graph] Parse failed — routing to END")
+        logger.info("[graph] Parse failed -- routing to END")
         return "end"
     return "recommend"
 
 
 def route_after_recommend(state: dict) -> str:
-    """
-    After recommendation, route to confirmation gate if successful, else END.
-    """
     if state.get("error"):
-        logger.info("[graph] Recommendation error — routing to END")
+        logger.info("[graph] Recommendation error -- routing to END")
         return "end"
     return "confirm"
 
 
-# ── Graph builder ─────────────────────────────────────────────────────────────
+# -- Observability finalisation node ------------------------------------------
+
+def node_finalise(state: dict) -> dict:
+    """
+    Final node before END -- aggregates per-agent metrics into SessionMetrics,
+    logs to MLflow, and stores the serialised payload in state.session_metrics
+    for Postgres persistence by the API layer.
+
+    Runs synchronously -- no LLM calls, just in-memory aggregation + I/O.
+    Fail-open: any error here is logged and skipped; pipeline state is unaffected.
+    """
+    session = SessionState(**state)
+
+    try:
+        from core.observability.metrics import SessionMetrics, _tokens_to_inr
+        from core.observability.mlflow_logger import log_session_metrics
+        from core.config.config_loader import cfg
+
+        # Reconstruct SessionMetrics from agent_metrics accumulated in state
+        metrics = SessionMetrics(session_id=session.session_id)
+
+        for agent, data in session.agent_metrics.items():
+            # Reconstruct latency
+            if "latency_secs" in data:
+                # Fake the start time to produce correct latency
+                metrics._agent_start[agent]   = 0.0
+                metrics.agent_latencies[agent] = data["latency_secs"]
+
+            # Reconstruct token usage
+            in_tok  = data.get("input_tokens",  0)
+            out_tok = data.get("output_tokens", 0)
+            model   = data.get("model", "claude-haiku-4-5-20251001")
+            calls   = max(int(data.get("llm_calls", 1) or 1), 1)
+            if in_tok or out_tok:
+                # Distribute tokens across N calls without losing the
+                # remainder to integer division. The first `extra_in` calls
+                # get one additional input token; same for output. Total
+                # recorded tokens equal the original aggregate exactly.
+                base_in,  extra_in  = divmod(in_tok,  calls)
+                base_out, extra_out = divmod(out_tok, calls)
+                for i in range(calls):
+                    metrics.record_llm_call(
+                        agent         = agent,
+                        input_tokens  = base_in  + (1 if i < extra_in  else 0),
+                        output_tokens = base_out + (1 if i < extra_out else 0),
+                        model         = model,
+                    )
+
+        # Quality metrics from ranked results
+        ranked     = session.ranked_jobs
+        fit_scores = [j.fit_score for j in ranked]
+        raw_count  = state.get("_raw_jobs_count", len(session.raw_jobs))
+
+        quality = {
+            "raw_jobs_fetched":   raw_count,
+            "ranked_jobs":        len(ranked),
+            "high_fit_count":     sum(1 for s in fit_scores if s >= 0.70),
+            "moderate_fit_count": sum(1 for s in fit_scores if 0.50 <= s < 0.70),
+            "mean_fit_score":     round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
+            # p25/p75 are meaningless with fewer than 3 data points -- null signals
+            # "insufficient sample" to dashboards rather than a misleading value.
+            "score_p25":          round(sorted(fit_scores)[len(fit_scores)//4],   3) if len(fit_scores) >= 3 else None,
+            "score_p75":          round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
+        }
+
+        # Total latency: sum of per-agent latencies. The pipeline is
+        # sequential between agents (parallelism happens *inside* the ranker
+        # and job-search agents, already reflected in their per-agent
+        # latency_secs values). Wall-clock cannot be measured here because
+        # SessionMetrics was just constructed -- started_at is "now", not
+        # the actual session start time.
+        total_latency = sum(metrics.agent_latencies.values())
+
+        metrics.finish(
+            quality_data           = quality,
+            total_latency_override = total_latency,
+        )
+        payload = metrics.to_dict()
+
+        # Store in state for API layer to persist to Postgres
+        session.session_metrics   = payload
+        session.pipeline_complete = True
+        session.results_ready     = True
+
+        # Log to MLflow (fail-open internally)
+        log_session_metrics(metrics)
+
+        logger.info(
+            f"[graph:finalise] Metrics captured -- "
+            f"latency={payload['total_latency_secs']}s | "
+            f"cost=INR {payload['total_cost_inr']} | "
+            f"calls={payload['total_llm_calls']}"
+        )
+
+    except Exception as e:
+        logger.error(f"[graph:finalise] Metrics aggregation failed: {e}", exc_info=False)
+        session.pipeline_complete = True
+        session.results_ready     = True
+
+    return session.model_dump()
+
+
+# -- Graph builder -------------------------------------------------------------
 
 def build_graph(use_postgres: bool = False):
     """
@@ -151,8 +255,10 @@ def build_graph(use_postgres: bool = False):
     builder.add_node("recommend_profiles", node_recommend_profiles)
     builder.add_node("user_confirmation",  node_user_confirmation)
     builder.add_node("search_jobs",        node_job_search)
+    builder.add_node("prune_urls",         node_url_pruner)
     builder.add_node("rank_results",       node_ranker)
-    builder.add_node("hiring_signals",     node_signals)
+    builder.add_node("finalise",           node_finalise)   # observability aggregation
+    # hiring_signals intentionally excluded -- Option A. Code in agents/signals/.
 
     # Entry point
     builder.add_edge(START, "parse_resume")
@@ -171,13 +277,14 @@ def build_graph(use_postgres: bool = False):
         {"confirm": "user_confirmation", "end": END},
     )
 
-    # After confirmation → job search → rank → signals → END
+    # After confirmation -> job search -> URL prune -> rank -> finalise -> END
     builder.add_edge("user_confirmation", "search_jobs")
-    builder.add_edge("search_jobs",       "rank_results")
-    builder.add_edge("rank_results",      "hiring_signals")
-    builder.add_edge("hiring_signals",     END)
+    builder.add_edge("search_jobs",       "prune_urls")
+    builder.add_edge("prune_urls",        "rank_results")
+    builder.add_edge("rank_results",      "finalise")
+    builder.add_edge("finalise",          END)
 
-    # ── Checkpointer ─────────────────────────────────────────────────────────
+    # -- Checkpointer ---------------------------------------------------------
     if use_postgres:
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -185,7 +292,7 @@ def build_graph(use_postgres: bool = False):
             db_url = os.getenv("DATABASE_URL")
             if not db_url:
                 raise ValueError("DATABASE_URL not set")
-            # Create pool with open=False — lifespan will open it async
+            # Create pool with open=False -- lifespan will open it async
             pool = AsyncConnectionPool(
                 conninfo=db_url,
                 max_size=10,
@@ -214,7 +321,7 @@ def build_graph(use_postgres: bool = False):
     return graph
 
 
-# ── Convenience runner ────────────────────────────────────────────────────────
+# -- Convenience runner --------------------------------------------------------
 
 def create_session_config(session_id: str) -> dict:
     """
@@ -236,7 +343,7 @@ async def run_until_confirmation(
     config = create_session_config(session_id)
     state = await graph.ainvoke(initial_state, config=config)
     logger.info(
-        f"[graph] Pipeline paused at confirmation gate — "
+        f"[graph] Pipeline paused at confirmation gate -- "
         f"session_id={session_id}"
     )
     return state
@@ -267,7 +374,7 @@ async def resume_after_confirmation(
     )
 
     logger.info(
-        f"[graph] Pipeline resumed and completed — "
+        f"[graph] Pipeline resumed and completed -- "
         f"session_id={session_id}, "
         f"confirmed={len(selected_titles)} profiles"
     )

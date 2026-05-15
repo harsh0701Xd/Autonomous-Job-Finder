@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from datetime import datetime
 
 
-# ─────────────────────────────────────────────
+# 
 # Sub-schemas: Resume Parser output
-# ─────────────────────────────────────────────
+# 
 
 class SkillSet(BaseModel):
     technical: list[str] = Field(default_factory=list)
@@ -25,26 +25,21 @@ class WorkExperience(BaseModel):
     model_config = ConfigDict(extra="ignore")
     title: str
     company: str
-    start_date: Optional[str] = None       # YYYY-MM format, from LLM
-    end_date: Optional[str] = None         # YYYY-MM format, null = present
-    duration_months: Optional[int] = None  # calculated in Python post-parse
-    responsibilities: list[str] = Field(default_factory=list)
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    duration_months: Optional[int] = None
+    role_type: Literal[
+        "full_time", "internship", "other"
+    ] = "full_time"
     impact_signals: list[str] = Field(default_factory=list)
 
 
 class Education(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # silently drop gpa, major, etc.
+    model_config = ConfigDict(extra="ignore")
     degree: str
-    field: Optional[str] = None          # Claude sometimes returns "major" instead
+    field: Optional[str] = None
     institution: str
     year: Optional[int] = None
-
-
-class NotableProject(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    name: Optional[str] = None
-    description: str
-    tech_used: list[str] = Field(default_factory=list)
 
 
 class CareerGap(BaseModel):
@@ -55,26 +50,32 @@ class CareerGap(BaseModel):
 
 class CandidateProfile(BaseModel):
     current_title: Optional[str] = None
-    years_experience: Optional[float] = None
+
+    years_experience_full_time: float = 0.0
+    years_experience_other: float = 0.0
+
     seniority_level: Optional[
         Literal["intern", "junior", "mid", "senior", "lead", "principal", "executive"]
     ] = None
     skills: SkillSet = Field(default_factory=SkillSet)
     education: list[Education] = Field(default_factory=list)
     work_experience: list[WorkExperience] = Field(default_factory=list)
+
+    # ATS summary  Claude-written narrative, primary input for ranker scoring
+    ats_summary: Optional[str] = None
+
     career_trajectory: Optional[
         Literal["ascending", "lateral", "pivot", "re-entry"]
     ] = None
     pivot_signals: list[str] = Field(default_factory=list)
     domain_expertise: list[str] = Field(default_factory=list)
-    notable_projects: list[NotableProject] = Field(default_factory=list)
     career_gaps: list[CareerGap] = Field(default_factory=list)
-    raw_text: Optional[str] = None  # kept for downstream embedding use
+    raw_text: Optional[str] = None
 
 
-# ─────────────────────────────────────────────
+# 
 # Sub-schemas: Profile Recommender output
-# ─────────────────────────────────────────────
+# 
 
 class SuggestedProfile(BaseModel):
     title: str
@@ -85,9 +86,9 @@ class SuggestedProfile(BaseModel):
     source: Literal["system", "user_custom"] = "system"
 
 
-# ─────────────────────────────────────────────
+# 
 # Sub-schemas: Job Search output
-# ─────────────────────────────────────────────
+# 
 
 class RawJob(BaseModel):
     job_id: str
@@ -99,14 +100,12 @@ class RawJob(BaseModel):
     apply_url: str
     source: str                         # adzuna / jsearch / remoteok / firecrawl
     posted_date: Optional[datetime] = None
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
     matched_profile: str                # which confirmed profile triggered this
 
 
-# ─────────────────────────────────────────────
+# 
 # Sub-schemas: Ranker output
-# ─────────────────────────────────────────────
+# 
 
 class RankedJob(BaseModel):
     job_id: str
@@ -118,20 +117,42 @@ class RankedJob(BaseModel):
     apply_url: str
     source: str
     posted_date: Optional[datetime] = None
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    matched_via: list[str] = Field(default_factory=list)  # profile badge list
-    fit_score: float                    # 0.0 – 1.0 composite score
-    semantic_score: float
-    seniority_score: float
-    recency_score: float
-    gap_skills: list[str] = Field(default_factory=list)
-    recommended_action: Literal["apply_now", "apply_with_note", "monitor", "skip"] = "monitor"
+    matched_via: list[str] = Field(default_factory=list)
+    matched_profile: str = ""              # which confirmed profile this job ranked under
+
+    # Composite score  displayed as overall fit % to the user
+    fit_score: float = 0.0
+
+    # Sub-scores  all displayed to user on job card
+    experience_score: float = 0.0
+    skill_score: float = 0.0
+    domain_score: float = 0.0
+    recency_score: float = 0.0
+    education_score: Optional[float] = None   # null when JD has no education requirement
+    education_required: bool = False          # true when LLM found explicit edu requirement
+
+    # Title relevance -- how well the actual job title matches the searched profile.
+    # Scored by the LLM (0.0-1.0); used as a post-score filter via
+    # ranker.min_title_relevance in llm_config.yaml. Not included in fit_score.
+    title_relevance: Optional[float] = None
+
+    # Scoring notes + gap analysis from Claude (zero extra API cost  same call)
+    scoring_notes: str = ""
+    experience_gap: Optional[str] = None      # e.g. "Requires 5yr, candidate has 0.8yr"
+    skill_gaps: list[str] = Field(default_factory=list)   # e.g. ["Kubernetes", "dbt"]
+    domain_gap: Optional[str] = None          # e.g. "Role in healthcare; background pharma"
+    education_gap: Optional[str] = None       # e.g. "Requires Master's; candidate has Bachelor's"
+
+    # Sparse JD flag -- set True when the JD has fewer words than
+    # ranker.sparse_jd_word_threshold. fit_score is capped at
+    # ranker.sparse_jd_fit_score_cap to prevent near-empty JDs from
+    # topping the leaderboard with inflated neutral scores.
+    sparse_jd: bool = False
 
 
-# ─────────────────────────────────────────────
+# 
 # Sub-schemas: Hiring Signals output
-# ─────────────────────────────────────────────
+# 
 
 class HiringSignal(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -151,19 +172,19 @@ class HiringSignal(BaseModel):
     relevant_to_profiles: list[str] = Field(default_factory=list)
 
 
-# ─────────────────────────────────────────────
+# 
 # User preferences (Step 1 input)
-# ─────────────────────────────────────────────
+# 
 
 class UserPreferences(BaseModel):
-    location: str
-    work_type: Literal["remote", "hybrid", "on-site", "any"] = "any"
+    location: Optional[str] = None
+    work_type: Literal["office", "remote", "hybrid", "on-site", "any"] = "any"
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
 
 
-# ─────────────────────────────────────────────
-# Master session state — the LangGraph state object
-# ─────────────────────────────────────────────
+# 
+# Master session state  the LangGraph state object
+# 
 
 class SessionState(BaseModel):
     """
@@ -208,6 +229,14 @@ class SessionState(BaseModel):
     # Pipeline control
     current_agent: Optional[str] = None
     error: Optional[str] = None
+
+    # Observability  populated by each agent, read by graph.py at END
+    # Each key is an agent name, value is an AgentMetrics dict (from metrics.py)
+    agent_metrics: dict = Field(default_factory=dict)
+
+    # Full serialised SessionMetrics  written at pipeline END, stored in Postgres
+    session_metrics: Optional[dict] = None
+
     pipeline_complete: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

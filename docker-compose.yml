@@ -1,71 +1,148 @@
 services:
 
-  # ── FastAPI application ──────────────────────────────────────────────────────
+
+
+  #  FastAPI application 
+
   api:
+
     build:
+
       context: .
+
       dockerfile: Dockerfile
+
       target: runtime
+
     container_name: job-finder-api
+
     ports:
+
       - "8000:8000"
+
+      - "5001:5001"
+
     env_file:
+
       - .env
+
     environment:
+
       - APP_ENV=production
+
       - DATABASE_URL=postgresql://jobfinder:jobfinder@postgres:5432/jobfinder
+
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
       - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-autonomous-job-finder}
+
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+
     depends_on:
+
       postgres:
+
         condition: service_healthy
+
     volumes:
+
       # Mount source for hot reload in development
+
       - .:/app
+
     command: >
+
       uvicorn api.app:app
+
       --host 0.0.0.0
+
       --port 8000
+
       --reload
+
+      --timeout-keep-alive 120
+
     restart: unless-stopped
+
     networks:
+
       - jobfinder-net
+
     healthcheck:
+
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+
       interval: 30s
+
       timeout: 10s
+
       retries: 3
+
       start_period: 15s
 
-  # ── PostgreSQL (LangGraph checkpointer + session store) ──────────────────────
+
+
+  #  PostgreSQL (LangGraph checkpointer + session store) 
+
   postgres:
+
     image: postgres:16-alpine
+
     container_name: job-finder-postgres
+
     environment:
+
       POSTGRES_USER: jobfinder
+
       POSTGRES_PASSWORD: jobfinder
+
       POSTGRES_DB: jobfinder
+
     ports:
+
       - "5432:5432"
+
     volumes:
+
       - postgres_data:/var/lib/postgresql/data
+
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+
     restart: unless-stopped
+
     networks:
+
       - jobfinder-net
+
     healthcheck:
+
       test: ["CMD-SHELL", "pg_isready -U jobfinder -d jobfinder"]
+
       interval: 10s
+
       timeout: 5s
+
       retries: 5
+
       start_period: 10s
 
+
+
 volumes:
+
   postgres_data:
+
     driver: local
 
+
+
 networks:
+
   jobfinder-net:
+
     driver: bridge
+

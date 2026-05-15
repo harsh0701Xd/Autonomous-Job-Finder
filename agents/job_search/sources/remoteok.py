@@ -23,7 +23,7 @@ MAX_RESULTS     = 15   # cap to avoid flooding the pipeline
 
 def _matches_profile(job: dict, profile_title: str) -> bool:
     """
-    Simple keyword match — RemoteOK has no server-side search,
+    Simple keyword match  RemoteOK has no server-side search,
     so we filter client-side on title and tags.
     """
     title_lower   = (job.get("position") or "").lower()
@@ -48,7 +48,7 @@ async def search_remoteok(
     """
     Fetch and filter RemoteOK jobs matching a profile title.
 
-    RemoteOK returns all recent jobs — we filter locally by
+    RemoteOK returns all recent jobs  we filter locally by
     matching profile keywords against job title and tags.
 
     Args:
@@ -71,7 +71,7 @@ async def search_remoteok(
             response.raise_for_status()
             all_jobs = response.json()
 
-        # First item is metadata — skip it
+        # First item is metadata  skip it
         jobs = [j for j in all_jobs if isinstance(j, dict) and j.get("position")]
 
         # Filter by profile keywords
