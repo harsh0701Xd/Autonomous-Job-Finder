@@ -127,7 +127,7 @@ services:
   # schema from LangGraph). Artifacts stored in a named Docker volume.
   # Accessible via Nginx at /mlflow/.
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v3.0.0
+    image: ghcr.io/mlflow/mlflow:latest
     container_name: job-finder-mlflow
     command: >
       mlflow server
@@ -136,6 +136,7 @@ services:
       --backend-store-uri postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
       --default-artifact-root /mlflow/artifacts
       --workers 1
+      --allowed-hosts mlflow,mlflow:5000,localhost,127.0.0.1
     volumes:
       - mlflow_artifacts:/mlflow/artifacts
     depends_on:
