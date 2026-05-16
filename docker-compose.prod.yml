@@ -136,7 +136,7 @@ services:
       --backend-store-uri postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
       --default-artifact-root /mlflow/artifacts
       --workers 1
-      --allowed-hosts mlflow,mlflow:5000,localhost,127.0.0.1
+      --allowed-hosts mlflow,mlflow:5000,localhost,127.0.0.1,13.206.183.58
     volumes:
       - mlflow_artifacts:/mlflow/artifacts
     depends_on:
