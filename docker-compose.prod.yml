@@ -127,7 +127,7 @@ services:
   # schema from LangGraph). Artifacts stored in a named Docker volume.
   # Accessible via Nginx at /mlflow/.
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
+    image: ghcr.io/mlflow/mlflow:v3.0.0
     container_name: job-finder-mlflow
     command: >
       mlflow server
