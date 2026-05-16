@@ -90,10 +90,10 @@ def log_session_metrics(metrics: "SessionMetrics") -> None:
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(f"quality_{key}", value)
 
-            # Full JSON artifact -- use log_dict() so it's sent over HTTP
-            # to the MLflow server instead of writing to local filesystem
-            # (log_artifact() fails when artifact root is a remote path)
-            mlflow.log_dict(payload, "session_metrics/session_metrics.json")
+            # Note: artifact logging skipped intentionally.
+            # MLflow resolves artifact root as a local path (/mlflow/artifacts)
+            # which is only mounted in the MLflow container, not the API container.
+            # All metrics are already logged above -- the artifact would be redundant.
 
         logger.info(
             f"[mlflow] Logged session {metrics.session_id[:8]} -- "
