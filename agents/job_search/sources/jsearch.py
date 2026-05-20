@@ -136,41 +136,17 @@ def _get_headers() -> dict:
 def _build_query(
     profile_title: str,
     location:      Optional[str],
-    work_type:     str,
 ) -> str:
     """
-    Build a JSearch natural language query from profile + preferences.
+    Build a JSearch natural language query from profile + location.
 
-    Remote mode (location=None):
-        Query is profile title only  no location suffix.
-        JSearch remote_jobs_only parameter handles geography filtering.
-        Returns global results  no restriction to Indian remote roles.
-
-    Office/hybrid mode (location=str):
-        Query appends the selected city  surfaces on-site and hybrid roles
-        in that geography.
+    Always appends the city name so JSearch surfaces geographically relevant
+    results for all job types (on-site, hybrid, and remote).
+    The ranker's E3 location filter handles final geographic gating.
     """
-    if work_type == "remote" or not location:
+    if not location:
         return profile_title.strip()
     return f"{profile_title.strip()} {location.strip()}"
-
-
-def _should_include_work_type(job: dict, work_type: str) -> bool:
-    """
-    Work type filter.
-
-    remote  trust JSearch's server-side work_from_home=true filter.
-             Do NOT check job_is_remote  JSearch frequently returns valid remote
-             jobs with job_is_remote=false even when queried with work_from_home=true.
-             Applying a client-side check drops legitimate remote listings.
-
-    office  drop jobs explicitly flagged as remote (job_is_remote=True).
-             Missing/null is treated as office  conservative, keeps more results.
-    """
-    if work_type == "remote":
-        return True   # already filtered server-side by work_from_home=true
-    # office  only drop confirmed remote jobs
-    return job.get("job_is_remote", False) is not True
 
 
 def _is_quality_source(job: dict) -> tuple[bool, str]:
@@ -228,28 +204,26 @@ def _is_quality_source(job: dict) -> tuple[bool, str]:
 )
 async def search_jsearch(
     profile_title:  str,
-    location:       Optional[str],   # None for remote mode  no geography constraint
-    work_type:      str = "office",
+    location:       Optional[str],
     num_pages:      int = DEFAULT_PAGES,
 ) -> list[dict]:
     """
     Search JSearch API for jobs matching a profile title and location.
 
-    Applies two post-fetch filters:
-    1. Work type filter  (remote/hybrid/on-site)
-    2. Source quality filter (LinkedIn/Indeed/Glassdoor/ATS/direct career page)
+    Always queries with city context so JSearch surfaces geographically
+    relevant listings. Applies source quality filter (LinkedIn/Indeed/
+    Glassdoor/ATS/direct career page) to ensure only trustworthy listings
+    are returned. Geographic and remote-work gating is handled downstream
+    by the ranker's E3 location filter.
 
     Returns only quality-sourced jobs. All filter decisions are logged.
     """
-    query = _build_query(profile_title, location, work_type)
+    query = _build_query(profile_title, location)
 
     params = {
         "query":     query,
         "num_pages": str(num_pages),
     }
-
-    if work_type == "remote":
-        params["work_from_home"] = "true"
 
     logger.info(f"[jsearch] Searching: query='{query}' pages={num_pages}")
 
@@ -266,17 +240,8 @@ async def search_jsearch(
         jobs = data.get("data", [])
         raw_count = len(jobs)
 
-        #  Filter 1: Work type 
-        jobs = [j for j in jobs if _should_include_work_type(j, work_type)]
-        after_work_type = len(jobs)
-        if raw_count != after_work_type:
-            logger.info(
-                f"[jsearch] work_type filter '{work_type}': "
-                f"{raw_count}  {after_work_type} jobs"
-            )
-
-        #  Filter 2: Source quality 
-        kept   = []
+        #  Source quality filter
+        kept         = []
         rejected_log = []
 
         for job in jobs:
@@ -297,8 +262,8 @@ async def search_jsearch(
         # Summary log for LangSmith evaluation
         logger.info(
             f"[jsearch] Source quality filter: "
-            f"{after_work_type}  {len(kept)} jobs kept "
-            f"({after_work_type - len(kept)} rejected) | "
+            f"{raw_count}  {len(kept)} jobs kept "
+            f"({raw_count - len(kept)} rejected) | "
             f"query='{query}'"
         )
 

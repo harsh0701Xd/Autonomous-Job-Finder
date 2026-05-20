@@ -187,16 +187,23 @@ def node_finalise(state: dict) -> dict:
         fit_scores = [j.fit_score for j in ranked]
         raw_count  = state.get("_raw_jobs_count", len(session.raw_jobs))
 
+        # Per-stage funnel stats from ranker (Task #9)
+        ranker_metrics = session.agent_metrics.get("ranker", {})
+        jobs_by_stage  = ranker_metrics.get("jobs_by_stage", {})
+
         quality = {
-            "raw_jobs_fetched":   raw_count,
-            "ranked_jobs":        len(ranked),
-            "high_fit_count":     sum(1 for s in fit_scores if s >= 0.70),
-            "moderate_fit_count": sum(1 for s in fit_scores if 0.50 <= s < 0.70),
-            "mean_fit_score":     round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
-            # p25/p75 are meaningless with fewer than 3 data points -- null signals
-            # "insufficient sample" to dashboards rather than a misleading value.
-            "score_p25":          round(sorted(fit_scores)[len(fit_scores)//4],   3) if len(fit_scores) >= 3 else None,
-            "score_p75":          round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
+            "raw_jobs_fetched":         raw_count,
+            "ranked_jobs":              len(ranked),
+            "high_fit_count":           sum(1 for s in fit_scores if s >= 0.70),
+            "moderate_fit_count":       sum(1 for s in fit_scores if 0.50 <= s < 0.70),
+            "mean_fit_score":           round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
+            "score_p25":                round(sorted(fit_scores)[len(fit_scores)//4],   3) if len(fit_scores) >= 3 else None,
+            "score_p75":                round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
+            "fallback_activated":       int(session.fallback_activated),
+            "india_accessible_dropped": ranker_metrics.get("india_accessible_dropped", 0),
+            "pre_filter_skill_dropped": ranker_metrics.get("pre_filter_skill_dropped", 0),
+            # Per-stage counts surfaced as individual MLflow metrics for funnel analysis
+            **{f"stage_{k}": v for k, v in jobs_by_stage.items()},
         }
 
         # Total latency: sum of per-agent latencies. The pipeline is
@@ -359,23 +366,4 @@ async def resume_after_confirmation(
     Resume the graph after the user has confirmed their profile selections.
     Uses ainvoke to support async nodes (e.g. job search agent).
     """
-    from langgraph.types import Command
-
-    config = create_session_config(session_id)
-
-    resume_payload = {
-        "selected_titles": selected_titles,
-        "custom_profiles": custom_profiles or [],
-    }
-
-    state = await graph.ainvoke(
-        Command(resume=resume_payload),
-        config=config,
-    )
-
-    logger.info(
-        f"[graph] Pipeline resumed and completed -- "
-        f"session_id={session_id}, "
-        f"confirmed={len(selected_titles)} profiles"
-    )
-    return state
+    from langgraph.types import Comman

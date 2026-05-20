@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -174,6 +175,7 @@ async def _score_job(
         "experience_match":   0.5,
         "skill_match":        0.5,
         "domain_match":       0.5,
+        "india_accessible":   True,  # neutral: don't drop on scoring failure
         "scoring_notes":      "Scoring unavailable -- neutral scores applied.",
         "experience_gap":     None,
         "skill_gaps":         [],
@@ -239,6 +241,7 @@ async def _score_job(
                 "experience_match":   max(0.0, min(1.0, float(result.get("experience_match", 0.5)))),
                 "skill_match":        max(0.0, min(1.0, float(result.get("skill_match",      0.5)))),
                 "domain_match":       max(0.0, min(1.0, float(result.get("domain_match",     0.5)))),
+                "india_accessible":   bool(result.get("india_accessible", True)),
                 "scoring_notes":      str(result.get("scoring_notes", "")),
                 "experience_gap":     result.get("experience_gap") or None,
                 "skill_gaps":         [s for s in (result.get("skill_gaps") or []) if isinstance(s, str)][:4],
@@ -373,6 +376,7 @@ async def rank_jobs_async(
             recency_score      = rec_score,
             education_score    = edu_score,
             education_required = edu_required,
+            india_accessible   = scores.get("india_accessible", True),
             scoring_notes      = scores.get("scoring_notes", ""),
             experience_gap     = scores.get("experience_gap"),
             skill_gaps         = scores.get("skill_gaps", []),
@@ -406,7 +410,7 @@ async def rank_jobs_async(
 # -- Main agent function -------------------------------------------------------
 
 async def run_ranker_agent(state: SessionState) -> SessionState:
-    """Agent 6 -- Ranker. Deduplicates, applies caps, scores, ranks."""
+    """Agent 6 -- Ranker. Deduplicates, pre-filters, scores, filters, ranks."""
     state.current_agent = "ranker"
     _t0 = time.perf_counter()
     logger.info(
@@ -425,19 +429,79 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
         state.error = "Cannot rank jobs: candidate profile missing."
         return state
 
-    unique_jobs           = deduplicate(state.raw_jobs)
+    # ── Stage tracking dict (Task #9) ─────────────────────────────────────────
+    jobs_by_stage: dict[str, int] = {}
+
+    unique_jobs = deduplicate(state.raw_jobs)
+    jobs_by_stage["raw_into_ranker"] = len(state.raw_jobs)
+    jobs_by_stage["post_dedup"]      = len(unique_jobs)
+
+    # ── Skill overlap pre-filter (Task #7) ────────────────────────────────────
+    # Drop jobs whose JD text doesn't mention at least min_matches of the
+    # candidate's own technical skills. This is a cheap, domain-agnostic
+    # gate that saves Haiku tokens for clearly irrelevant listings.
+    #
+    # Algorithm:
+    #   - Single-word skills:  word-boundary regex (e.g. "Python" won't match "Pythonista")
+    #   - Multi-word skills:   case-insensitive substring (e.g. "machine learning")
+    #   - Threshold:           max(1, ceil(n_skills * min_skill_overlap_ratio))
+    tech_skills = state.candidate_profile.skills.technical or []
+    min_overlap_ratio = getattr(_CFG, "min_skill_overlap_ratio", 0.15)
+
+    if tech_skills and min_overlap_ratio > 0.0:
+        min_matches = max(1, math.ceil(len(tech_skills) * min_overlap_ratio))
+        logger.info(
+            f"[ranker:pre_filter] skill overlap: {len(tech_skills)} tech skills, "
+            f"ratio={min_overlap_ratio}, min_matches={min_matches}"
+        )
+
+        def _skill_in_jd(skill: str, jd_lower: str) -> bool:
+            skill_lower = skill.lower().strip()
+            if not skill_lower:
+                return False
+            if " " in skill_lower:
+                return skill_lower in jd_lower
+            return bool(re.search(r"\b" + re.escape(skill_lower) + r"\b", jd_lower))
+
+        passed_pre_filter: list[RawJob] = []
+        for job in unique_jobs:
+            jd_lower = (job.jd_text or "").lower()
+            match_count = sum(1 for s in tech_skills if _skill_in_jd(s, jd_lower))
+            if match_count >= min_matches:
+                passed_pre_filter.append(job)
+
+        dropped_pre = len(unique_jobs) - len(passed_pre_filter)
+        logger.info(
+            f"[ranker:pre_filter] skill overlap: "
+            f"{len(unique_jobs)} -> {len(passed_pre_filter)} jobs "
+            f"({dropped_pre} dropped, min_matches={min_matches})"
+        )
+        jobs_by_stage["post_skill_prefilter"] = len(passed_pre_filter)
+        state.agent_metrics.setdefault("ranker", {}).update({
+            "pre_filter_skill_min_matches":  min_matches,
+            "pre_filter_skill_passed":       len(passed_pre_filter),
+            "pre_filter_skill_dropped":      dropped_pre,
+        })
+        unique_jobs = passed_pre_filter
+    else:
+        jobs_by_stage["post_skill_prefilter"] = len(unique_jobs)
+
+    # ── LLM scoring ───────────────────────────────────────────────────────────
     ranked, ranker_tokens = await rank_jobs_async(
         jobs      = unique_jobs,
         profile   = state.candidate_profile,
         confirmed = state.confirmed_profiles,
     )
+    jobs_by_stage["post_llm_score"] = len(ranked)
 
-    # -- Experience score threshold filter -------------------------------------
+    # Snapshot after scoring -- used for zero-results fallback (Task #5)
+    ranked_scored = ranked.copy()
+
+    # ── Experience score threshold filter ─────────────────────────────────────
     # Two thresholds, selected by seniority_preference:
-    #   same_level -> min_experience_score_same   (stricter: candidate should be competitive)
-    #   step_up    -> min_experience_score_step_up (lenient: experience gap is expected)
-    # Configurable via ranker.min_experience_score_same / min_experience_score_step_up
-    # in llm_config.yaml. Set either to 0.0 to disable that threshold.
+    #   same_level -> min_experience_score_same   (stricter)
+    #   step_up    -> min_experience_score_step_up (lenient: gap is expected)
+    # Set either to 0.0 in llm_config.yaml to disable that threshold.
     seniority_pref = (
         state.preferences.seniority_preference if state.preferences else "same_level"
     )
@@ -455,16 +519,11 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
                 f"[ranker] exp_score filter (>={min_exp}, seniority={seniority_pref}): "
                 f"{before} -> {len(ranked)} jobs ({dropped} dropped)"
             )
+    jobs_by_stage["post_exp_filter"] = len(ranked)
 
-    # -- Title relevance threshold filter --------------------------------------
-    # Drop jobs where the LLM-assigned title_relevance is below the configured
-    # minimum. These are roles returned by APIs that are semantically related
-    # but don't match the profile the candidate searched for
-    # (e.g. "Data Scientist" returned when searching "ML Engineer").
-    # Configurable via ranker.min_title_relevance in llm_config.yaml.
-    # Set to 0.0 to disable the filter entirely.
-    # NOTE: uses explicit None check (not `or`) so that a genuine score of 0.0
-    # is treated as 0.0 and filtered, not as falsy and replaced with 1.0.
+    # ── Title relevance threshold filter ──────────────────────────────────────
+    # Drop jobs where title_relevance < min_title_relevance.
+    # Set to 0.0 in llm_config.yaml to disable.
     min_title_rel = _CFG.min_title_relevance
     if min_title_rel > 0.0:
         before  = len(ranked)
@@ -475,16 +534,31 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
                 f"[ranker] title_relevance filter (>={min_title_rel}): "
                 f"{before} -> {len(ranked)} jobs ({dropped} dropped)"
             )
+    jobs_by_stage["post_title_filter"] = len(ranked)
 
-    # -- Sparse JD detection + fit_score cap ----------------------------------
-    # JDs that slipped through the normalizer's 60-word gate but are still thin
-    # (< sparse_jd_word_threshold words) receive unreliably inflated scores
-    # because Claude finds no contradicting evidence in the near-empty text.
-    # Flag these as sparse_jd=True and cap their fit_score so they cannot
-    # top the leaderboard over richer, genuinely better-matched listings.
-    # Re-sort after capping so rankings reflect the corrected scores.
-    # Configurable via ranker.sparse_jd_word_threshold / sparse_jd_fit_score_cap
-    # in llm_config.yaml. Set sparse_jd_word_threshold=0 to disable.
+    # ── Zero-results fallback (Task #5) ───────────────────────────────────────
+    # If exp_score + title_relevance filters left zero jobs, relax exp_score
+    # to 0.0 and re-apply only title + E3 location. This ensures the user
+    # always sees something rather than an empty result set, while still
+    # maintaining title and location quality gates.
+    if not ranked and ranked_scored:
+        logger.warning(
+            "[ranker] Fallback activated: exp_score filter eliminated all jobs. "
+            "Re-applying with exp_score relaxed to 0.0."
+        )
+        ranked = ranked_scored.copy()
+        if min_title_rel > 0.0:
+            ranked = [
+                j for j in ranked
+                if (j.title_relevance if j.title_relevance is not None else 1.0) >= min_title_rel
+            ]
+        state.fallback_activated = True
+        state.fallback_reason    = "exp_score_relaxed"
+        logger.info(
+            f"[ranker] Fallback result: {len(ranked)} jobs after title filter"
+        )
+
+    # ── Sparse JD detection + fit_score cap ───────────────────────────────────
     sparse_threshold = _CFG.sparse_jd_word_threshold
     sparse_cap       = _CFG.sparse_jd_fit_score_cap
     if sparse_threshold > 0:
@@ -506,52 +580,17 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
             logger.info(
                 f"[ranker] sparse_jd flagged: {flagged} job(s) marked sparse_jd=True"
             )
-        # Re-sort after capping so order reflects corrected scores
         ranked.sort(key=lambda j: j.fit_score, reverse=True)
 
-    # -- Post-score compliance filters -----------------------------------------
-    # Applied AFTER LLM scoring so every job has a fit_score, but BEFORE
-    # storing to state.ranked_jobs.  These enforce the user's explicit
-    # location and work_type preferences using authoritative post-ranking
-    # checks -- more reliable than API-level filters which are inconsistent
-    # across sources.
+    # ── Post-score compliance filters ─────────────────────────────────────────
+    # Applied AFTER LLM scoring. Geographic and india-accessibility gating
+    # is more reliable here than at the API level.
 
     prefs = state.preferences
 
-    # E2: work_type filter
-    # "any" bypasses entirely.  "on-site", "onsite", "office" are treated as
-    # equivalent (all mean the user wants an in-office role).
-    # Jobs with work_type=None are kept (benefit of the doubt -- unknown).
-    _OFFICE_VARIANTS = {"office", "on-site", "onsite"}
-
-    def _work_type_matches(job_wt: str | None, pref_wt: str) -> bool:
-        if job_wt is None:
-            return True
-        jnorm = job_wt.lower().strip()
-        pnorm = pref_wt.lower().strip()
-        if jnorm in _OFFICE_VARIANTS:
-            jnorm = "office"
-        if pnorm in _OFFICE_VARIANTS:
-            pnorm = "office"
-        return jnorm == pnorm
-
-    if prefs and prefs.work_type and prefs.work_type != "any":
-        before_wt = len(ranked)
-        ranked = [j for j in ranked if _work_type_matches(j.work_type, prefs.work_type)]
-        dropped_wt = before_wt - len(ranked)
-        if dropped_wt:
-            logger.info(
-                f"[ranker] work_type filter: dropped {dropped_wt} jobs "
-                f"(preference='{prefs.work_type}')"
-            )
-
     # E3: location filter
-    # Skipped when preference is blank/None.
-    # Remote jobs (work_type=="remote") bypass location check -- they are
-    # location-agnostic by definition.
-    # Jobs whose location string is empty are kept (benefit of the doubt).
-    # Matching uses a city alias map so "Bangalore" matches "Bengaluru,Karnataka"
-    # and "Delhi NCR" matches "Noida", "Gurugram", etc.
+    # Remote jobs bypass location check -- they are location-agnostic.
+    # Jobs with empty location string are kept (benefit of the doubt).
     _LOCATION_ALIASES: dict[str, list[str]] = {
         "bengaluru":  ["bengaluru", "bangalore"],
         "delhi ncr":  ["delhi", "gurgaon", "gurugram", "noida", "faridabad", "ncr"],
@@ -566,11 +605,8 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
             return True
         jloc = job_loc.lower()
         ploc = pref_loc.lower().strip()
-        # Direct substring match
         if ploc in jloc:
             return True
-        # Alias map lookup: find the canonical group the preference belongs to,
-        # then check if any alias of that group appears in the job location.
         for canonical, aliases in _LOCATION_ALIASES.items():
             if ploc == canonical or any(ploc == a for a in aliases):
                 return any(alias in jloc for alias in aliases)
@@ -580,15 +616,31 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
         before_loc = len(ranked)
         ranked = [
             j for j in ranked
-            if j.work_type == "remote"          # remote jobs are location-agnostic
+            if j.work_type == 'remote'
             or _location_matches(j.location, prefs.location)
         ]
         dropped_loc = before_loc - len(ranked)
         if dropped_loc:
             logger.info(
-                f"[ranker] location filter: dropped {dropped_loc} jobs "
+                f"[ranker] location filter (E3): dropped {dropped_loc} jobs "
                 f"(preference='{prefs.location}')"
             )
+    jobs_by_stage['post_location_filter'] = len(ranked)
+
+    # India-accessible filter (Task #10)
+    before_ia = len(ranked)
+    ranked = [
+        j for j in ranked
+        if j.work_type != 'remote' or j.india_accessible
+    ]
+    dropped_ia = before_ia - len(ranked)
+    if dropped_ia:
+        logger.info(
+            f"[ranker] india_accessible filter: dropped {dropped_ia} remote job(s) "
+            f"requiring US work authorisation"
+        )
+    jobs_by_stage['post_india_accessible_filter'] = len(ranked)
+    jobs_by_stage['final_ranked']                 = len(ranked)
 
     state.ranked_jobs   = ranked
     state.results_ready = True
@@ -596,21 +648,28 @@ async def run_ranker_agent(state: SessionState) -> SessionState:
 
     elapsed    = round(time.perf_counter() - _t0, 2)
     fit_scores = [j.fit_score for j in ranked] if ranked else []
-    state.agent_metrics["ranker"] = {
-        "model":          _CFG.model,
-        "input_tokens":   ranker_tokens.get("input",  0),
-        "output_tokens":  ranker_tokens.get("output", 0),
-        "llm_calls":      len(unique_jobs),
-        "latency_secs":   elapsed,
-        "jobs_ranked":    len(ranked),
-        "mean_fit_score": round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
-        # p25/p75 are meaningless with fewer than 3 data points -- null signals
-        # "insufficient sample" to dashboards rather than a misleading value.
-        "score_p25":      round(sorted(fit_scores)[len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
-        "score_p75":      round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
-    }
 
-    logger.info(f"[ranker] Done -- {len(ranked)} ranked jobs | latency={elapsed}s")
+    existing_ranker_metrics = state.agent_metrics.get('ranker', {})
+    existing_ranker_metrics.update({
+        'model':                    _CFG.model,
+        'input_tokens':             ranker_tokens.get('input',  0),
+        'output_tokens':            ranker_tokens.get('output', 0),
+        'llm_calls':                len(unique_jobs),
+        'latency_secs':             elapsed,
+        'jobs_ranked':              len(ranked),
+        'fallback_activated':       state.fallback_activated,
+        'india_accessible_dropped': dropped_ia,
+        'mean_fit_score':           round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
+        'score_p25':                round(sorted(fit_scores)[len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
+        'score_p75':                round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
+        'jobs_by_stage':            jobs_by_stage,
+    })
+    state.agent_metrics['ranker'] = existing_ranker_metrics
+
+    logger.info(
+        f"[ranker] Done -- {len(ranked)} ranked jobs | latency={elapsed}s | "
+        f"stages: {jobs_by_stage}"
+    )
     return state
 
 
@@ -620,7 +679,7 @@ async def node_ranker(state: dict) -> dict:
     """LangGraph async node wrapper for Agent 6 (Ranker)."""
     session = SessionState(**state)
     if not session.raw_jobs:
-        logger.warning("[graph] Skipping ranker -- no raw jobs")
+        logger.warning('[graph] Skipping ranker -- no raw jobs')
         return state
     updated = await run_ranker_agent(session)
     return updated.model_dump()

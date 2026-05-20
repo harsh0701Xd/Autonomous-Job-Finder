@@ -44,20 +44,15 @@ _TIMEOUT  = 30.0   # POST with description fetch can be slower
 def _build_payload(
     profile_title: str,
     location:      str,
-    work_type:     str,
     results:       int,
 ) -> dict[str, Any]:
     """Build the POST request body."""
-    is_remote = work_type.lower() == "remote"
-
-    # Map common city names to India country code
     return {
         "search_term":                profile_title,
         "location":                   location,
         "country_indeed":             "India",
         "results_wanted":             results,
         "site_name":                  ["indeed", "linkedin", "naukri", "glassdoor"],
-        "is_remote":                  is_remote,
         "linkedin_fetch_description": True,   # REQUIRED for full JD text
         "hours_old":                  cfg.job_search.hours_old,
         "distance":                   50,
@@ -67,7 +62,6 @@ def _build_payload(
 async def search_jobs_search_api(
     profile_title: str,
     location:      str,
-    work_type:     str,
     num_pages:     int = 2,
 ) -> list[dict[str, Any]]:
     """
@@ -93,7 +87,7 @@ async def search_jobs_search_api(
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         for page in range(num_pages):
-            payload = _build_payload(profile_title, location, work_type, results=10)
+            payload = _build_payload(profile_title, location, results=10)
 
             logger.info(
                 f"[jobs_search_api] Request {page + 1} — "

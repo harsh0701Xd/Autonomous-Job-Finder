@@ -104,7 +104,7 @@ async def create_session(body: CreateSessionRequest) -> CreateSessionResponse:
 
     logger.info(
         f"[routes] Session created: {session_id} — "
-        f"location={body.location}, work_type={body.work_type}"
+        f"location={body.location}, seniority={body.seniority_preference}"
     )
 
     return CreateSessionResponse(
@@ -145,7 +145,6 @@ async def upload_resume(
     prefs_data = session_record["preferences"]
     preferences = UserPreferences(
         location             = prefs_data["location"],
-        work_type            = prefs_data["work_type"],
         seniority_preference = prefs_data["seniority_preference"],
     )
 
@@ -544,11 +543,12 @@ async def get_results(session_id: str) -> ResultsResponse:
         )
 
     return ResultsResponse(
-        session_id  = session_id,
-        total_jobs  = len(jobs),
-        jobs        = jobs,
-        watch_list  = watch_list,
-        message     = msg,
+        session_id      = session_id,
+        total_jobs      = len(jobs),
+        jobs            = jobs,
+        watch_list      = watch_list,
+        message         = msg,
+        session_metrics = state.session_metrics,
     )
 
 
@@ -561,4 +561,4 @@ async def get_results(session_id: str) -> ResultsResponse:
 )
 async def health_check() -> HealthResponse:
     """Returns API health status."""
-    return HealthResponse(status="ok")
+    return Hea

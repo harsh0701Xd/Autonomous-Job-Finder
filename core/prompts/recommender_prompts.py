@@ -33,6 +33,13 @@ Rules:
     "high"    direct evidence in skills + experience
     "medium"  transferable skills present but not direct experience
     "low"     aspirational, significant gap exists
+- search_variants: up to 2 common alternative job titles used in postings for the
+  same role (abbreviations, industry synonyms, equally common alternate phrasings).
+  These are used internally for job search API queries only — never shown to the user.
+  Leave as [] if the main title is already universal (e.g. "Software Engineer").
+  Examples: "ML Engineer" -> ["Machine Learning Engineer", "AI Engineer"]
+            "Data Scientist" -> ["Applied Scientist"]
+            "Backend Engineer" -> ["Backend Developer", "Server-Side Engineer"]
 
 Return ONLY a valid JSON array. No explanation, no markdown, no code fences.
 
@@ -42,7 +49,8 @@ Schema for each item:
   "seniority_target": "junior" | "mid" | "senior" | "lead" | "principal",
   "confidence": "high" | "medium" | "low",
   "match_reason": string (1 sentence, specific to this candidate),
-  "is_stretch": boolean
+  "is_stretch": boolean,
+  "search_variants": list[string]
 }}
 
 Candidate profile:
@@ -50,7 +58,6 @@ Candidate profile:
 
 User preferences:
 - Location: {location}
-- Work type: {work_type}
 - Seniority preference: {seniority_preference}
 
 Return ONLY the JSON array.

@@ -119,15 +119,6 @@ def show_onboarding():
     with col_right:
         st.markdown("#### Preferences")
 
-        work_type = st.selectbox(
-            "Work arrangement",
-            ["office", "remote"],
-            format_func=lambda x: {
-                "office": "On-site / Hybrid",
-                "remote": "Remote only",
-            }[x],
-        )
-
         INDIA_LOCATIONS = [
             "Bengaluru", "Chennai", "Delhi", "Gurgaon", "Hyderabad",
             "Kolkata", "Mumbai", "Noida", "Greater Noida", "Pune",
@@ -135,11 +126,11 @@ def show_onboarding():
             "Kochi", "Lucknow", "Patna", "Ranchi",
         ]
 
-        if work_type == "office":
-            location = st.selectbox("Location", options=INDIA_LOCATIONS)
-        else:
-            location = None
-            st.caption("Remote only  searching across all geographies.")
+        location = st.selectbox("Location", options=INDIA_LOCATIONS)
+        st.caption(
+            "Job search uses your city for on-site and hybrid roles. "
+            "Remote listings are also included and filtered for India accessibility."
+        )
 
         seniority = st.selectbox(
             "Seniority target",
@@ -168,7 +159,6 @@ def show_onboarding():
         _run_onboarding(
             uploaded  = uploaded,
             location  = location,
-            work_type = work_type,
             seniority = seniority,
         )
 
@@ -176,7 +166,7 @@ def show_onboarding():
         st.caption("Upload your resume to continue.")
 
 
-def _run_onboarding(uploaded, location, work_type, seniority):
+def _run_onboarding(uploaded, location, seniority):
     MAX_BYTES = 10 * 1024 * 1024
     if uploaded.size > MAX_BYTES:
         st.error(
@@ -191,7 +181,6 @@ def _run_onboarding(uploaded, location, work_type, seniority):
                 "/sessions",
                 json={
                     "location":             location or "",
-                    "work_type":            work_type,
                     "seniority_preference": seniority,
                 },
             )
@@ -576,7 +565,7 @@ def show_results():
   <p style="font-size:16px;font-weight:500;margin:0 0 8px">No matching jobs found</p>
   <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 20px;line-height:1.6">
     The search ran successfully but no listings passed the quality filter.<br>
-    Try: switching to Remote mode · a broader job title · a different city
+    Try: a broader job title · a different city · starting a new search
   </p>
 </div>
 """, unsafe_allow_html=True)
@@ -591,6 +580,34 @@ def show_results():
         "</p>",
         unsafe_allow_html=True,
     )
+
+    # -- Pipeline funnel summary (Task #9) ------------------------------------
+    session_metrics = results.get("session_metrics") or {}
+    quality         = session_metrics.get("quality", {})
+    stage_keys = [
+        ("stage_raw_into_ranker",              "Raw into ranker"),
+        ("stage_post_dedup",                   "After dedup"),
+        ("stage_post_skill_prefilter",         "After skill filter"),
+        ("stage_post_llm_score",               "After LLM scoring"),
+        ("stage_post_exp_filter",              "After exp filter"),
+        ("stage_post_title_filter",            "After title filter"),
+        ("stage_post_location_filter",         "After location filter"),
+        ("stage_post_india_accessible_filter", "After India filter"),
+        ("stage_final_ranked",                 "Final ranked"),
+    ]
+    funnel_data = [(label, quality[key]) for key, label in stage_keys if key in quality]
+    if funnel_data:
+        with st.expander("📊 Pipeline funnel", expanded=False):
+            fallback = quality.get("fallback_activated", 0)
+            if fallback:
+                st.warning(
+                    "⚠️ Experience filter returned 0 jobs — fallback activated "
+                    "(exp_score relaxed, title + location filters still applied).",
+                    icon="⚠️",
+                )
+            cols = st.columns(len(funnel_data))
+            for col, (label, count) in zip(cols, funnel_data):
+                col.metric(label, count)
 
     col_label, col_slider, col_count = st.columns([1.2, 4, 1.2])
     with col_label:
@@ -818,44 +835,3 @@ def _render_job_card(job: dict):
                     )
 
 
-#  Progress indicator
-
-def _show_step_indicator():
-    steps   = ["Upload", "Confirm", "Results"]
-    current = st.session_state.step
-    cols    = st.columns(len(steps))
-    for i, (col, label) in enumerate(zip(cols, steps), 1):
-        with col:
-            if i < current:
-                st.markdown(
-                    f'<p style="text-align:center;font-size:12px;color:#3B6D11"> {label}</p>',
-                    unsafe_allow_html=True,
-                )
-            elif i == current:
-                st.markdown(
-                    f'<p style="text-align:center;font-size:12px;font-weight:600;color:#185FA5"> {label}</p>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<p style="text-align:center;font-size:12px;color:#aaa"> {label}</p>',
-                    unsafe_allow_html=True,
-                )
-    st.divider()
-
-
-#  Main router
-
-def main():
-    _show_step_indicator()
-    step = st.session_state.step
-    if step == 1:
-        show_onboarding()
-    elif step == 2:
-        show_confirmation()
-    elif step == 3:
-        show_results()
-
-
-if __name__ == "__main__":
-    main()

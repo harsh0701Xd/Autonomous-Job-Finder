@@ -146,11 +146,20 @@ def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
         raise ValueError(f"Expected JSON array, got {type(data).__name__}")
 
     profiles = []
+    max_variants = getattr(cfg.job_search, "title_variants_max", 2)
+
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             logger.warning(f"Skipping non-dict item at index {i}: {item}")
             continue
         try:
+            # Parse search_variants: cap at title_variants_max, must be strings
+            raw_variants = item.get("search_variants") or []
+            variants: list[str] = []
+            if isinstance(raw_variants, list):
+                variants = [v for v in raw_variants if isinstance(v, str) and v.strip()]
+                variants = variants[:max_variants]
+
             profile = SuggestedProfile(
                 title            = item["title"],
                 seniority_target = item["seniority_target"],
@@ -158,6 +167,7 @@ def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
                 match_reason     = item["match_reason"],
                 is_stretch       = item.get("is_stretch", False),
                 source           = "system",
+                search_variants  = variants,
             )
             profiles.append(profile)
         except (KeyError, ValueError) as e:
@@ -173,57 +183,7 @@ def _parse_profiles(raw_json: str) -> list[SuggestedProfile]:
     # Cap at MAX_PROFILES
     profiles = profiles[:MAX_PROFILES]
 
-    # Deduplicate by canonical title (#13).
-    # "ML Engineer" and "Machine Learning Engineer" resolve to the same
-    # canonical and would produce near-identical search results -- keep the
-    # higher-confidence one and drop the duplicate.
-    profiles = _dedup_by_canonical(profiles)
-
     return profiles
-
-
-_CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
-
-
-def _dedup_by_canonical(profiles: list[SuggestedProfile]) -> list[SuggestedProfile]:
-    """
-    Collapse profiles whose titles map to the same canonical search term.
-
-    Uses cfg.title_canonical_map (from llm_config.yaml). Titles not in the
-    map are treated as their own canonical (pass-through). When two profiles
-    share a canonical, the higher-confidence one is kept; on a tie, the first
-    (lower-index) profile wins. Domain-agnostic.
-    """
-    canonical_map = cfg.title_canonical_map  # dict alias -> canonical
-    seen: dict[str, SuggestedProfile] = {}
-
-    for profile in profiles:
-        canonical_key = canonical_map.get(profile.title, profile.title).lower()
-        existing = seen.get(canonical_key)
-        if existing is None:
-            seen[canonical_key] = profile
-        else:
-            # Keep the higher-confidence profile
-            if (
-                _CONFIDENCE_RANK.get(profile.confidence, 0)
-                > _CONFIDENCE_RANK.get(existing.confidence, 0)
-            ):
-                logger.info(
-                    "[profile_recommender] Dedup: '%s' supersedes '%s' "
-                    "(both -> '%s', %s > %s)",
-                    profile.title, existing.title, canonical_key,
-                    profile.confidence, existing.confidence,
-                )
-                seen[canonical_key] = profile
-            else:
-                logger.info(
-                    "[profile_recommender] Dedup: '%s' dropped "
-                    "(same canonical as '%s' -> '%s', %s >= %s)",
-                    profile.title, existing.title, canonical_key,
-                    existing.confidence, profile.confidence,
-                )
-
-    return list(seen.values())
 
 
 # -- Validation ---------------------------------------------------------------
@@ -314,7 +274,6 @@ def run_profile_recommender(state: SessionState) -> SessionState:
     prompt = PROFILE_RECOMMEND_PROMPT.format(
         candidate_profile_json = profile_json,
         location               = prefs.location,
-        work_type              = prefs.work_type,
         seniority_preference   = prefs.seniority_preference,
     )
 

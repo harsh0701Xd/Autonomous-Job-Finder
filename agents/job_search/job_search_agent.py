@@ -63,22 +63,11 @@ def _canonicalize_title(title: str) -> str:
     return canonical
 
 
-# -- Source activation logic ---------------------------------------------------
-
-def _should_include_remoteok(work_type: str, location: str) -> bool:
-    """Activate RemoteOK when user prefers remote work."""
-    if work_type == "remote":
-        return True
-    loc = (location or "").lower()
-    return "remote" in loc
-
-
 # -- Per-profile search --------------------------------------------------------
 
 async def _search_one_profile(
     profile_title: str,
     location:      str,
-    work_type:     str,
 ) -> tuple[list[RawJob], dict[str, dict[str, int]]]:
     """
     Run all active sources for a single profile in parallel.
@@ -94,7 +83,6 @@ async def _search_one_profile(
         "jsearch", search_jsearch(
             profile_title = profile_title,
             location      = location,
-            work_type     = work_type,
             num_pages     = cfg.job_search.num_pages,
         )
     ))
@@ -105,7 +93,6 @@ async def _search_one_profile(
             "active_jobs_db", search_active_jobs_db(
                 profile_title = profile_title,
                 location      = location,
-                work_type     = work_type,
                 num_pages     = cfg.job_search.active_jobs_db_pages,
             )
         ))
@@ -116,7 +103,6 @@ async def _search_one_profile(
             "linkedin_jobs", search_linkedin_jobs(
                 profile_title = profile_title,
                 location      = location,
-                work_type     = work_type,
                 num_pages     = cfg.job_search.linkedin_jobs_pages,
             )
         ))
@@ -127,7 +113,7 @@ async def _search_one_profile(
             "techmap", search_techmap(
                 profile_title = profile_title,
                 location      = location,
-                work_type     = work_type,
+                work_type     = "any",
                 num_pages     = cfg.job_search.techmap_pages,
             )
         ))
@@ -138,19 +124,18 @@ async def _search_one_profile(
             "jobs_search_api", search_jobs_search_api(
                 profile_title = profile_title,
                 location      = location,
-                work_type     = work_type,
                 num_pages     = cfg.job_search.jobs_search_api_pages,
             )
         ))
 
-    # RemoteOK -- activate when work_type == "remote"
-    if _should_include_remoteok(work_type, location):
-        tasks.append((
-            "remoteok", search_remoteok(
-                profile_title = profile_title,
-                max_results   = 15,
-            )
-        ))
+    # RemoteOK -- always active; global remote listings complement location-based results.
+    # Ranker E3 location filter and india_accessible filter gate final inclusion.
+    tasks.append((
+        "remoteok", search_remoteok(
+            profile_title = profile_title,
+            max_results   = 15,
+        )
+    ))
 
     # Run all sources concurrently
     sources, coroutines = zip(*tasks)
@@ -215,20 +200,28 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
         state.error = "No confirmed profiles to search for."
         return state
 
-    prefs     = state.preferences
-    location  = prefs.location
-    work_type = prefs.work_type
+    prefs    = state.preferences
+    location = prefs.location
 
-    # Run search for all profiles concurrently.
-    # Canonicalise each title before querying (#12): "ML Engineer" →
+    # Build search tasks: one per (confirmed profile + each search variant).
+    # Canonicalise each title before querying: "ML Engineer" →
     # "Machine Learning Engineer" to maximise API result coverage.
+    # Variants are searched with the parent profile title as matched_profile
+    # so downstream attribution stays correct.
+    search_tasks: list[tuple[str, str]] = []  # (search_title, matched_profile_title)
+    for profile in state.confirmed_profiles:
+        canonical = _canonicalize_title(profile.title)
+        search_tasks.append((canonical, profile.title))
+        for variant in (profile.search_variants or []):
+            variant_canonical = _canonicalize_title(variant)
+            search_tasks.append((variant_canonical, profile.title))
+
     profile_tasks = [
         _search_one_profile(
-            profile_title = _canonicalize_title(profile.title),
+            profile_title = search_title,
             location      = location,
-            work_type     = work_type,
         )
-        for profile in state.confirmed_profiles
+        for search_title, _ in search_tasks
     ]
 
     profile_results = await asyncio.gather(
@@ -237,18 +230,22 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
 
     all_jobs: list[RawJob] = []
     # Aggregate per-source contribution counts across every confirmed
-    # profile. Silent-zero sources (configured but contributing nothing)
-    # are surfaced as a separate WARNING below.
+    # profile and variant. Silent-zero sources (configured but contributing
+    # nothing) are surfaced as a separate WARNING below.
     source_stats_total: dict[str, dict[str, int]] = {}
     for i, result in enumerate(profile_results):
-        profile_title = state.confirmed_profiles[i].title
+        search_title, matched_profile_title = search_tasks[i]
         if isinstance(result, Exception):
             logger.error(
                 f"[job_search] Profile search failed for "
-                f"'{profile_title}': {type(result).__name__}: {result}"
+                f"'{search_title}': {type(result).__name__}: {result}"
             )
             continue
         jobs, src_stats = result
+        # Override matched_profile on each job so attribution uses the parent
+        # confirmed profile title, not the variant title.
+        for job in jobs:
+            job.matched_profile = matched_profile_title
         all_jobs.extend(jobs)
         for src, stats in src_stats.items():
             agg = source_stats_total.setdefault(src, {"jobs": 0, "errors": 0})
@@ -302,13 +299,17 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
     # quotas, missing keys, schema drift) become visible in MLflow and in
     # the session_metrics payload returned to the API layer.
     elapsed = round(time.perf_counter() - _t0, 2)
+    confirmed_titles  = [p.title for p in state.confirmed_profiles]
+    variant_searches  = [st for st, mp in search_tasks if st not in confirmed_titles]
+
     state.agent_metrics["job_search"] = {
         "latency_secs":       elapsed,
         "total_jobs":         len(deduped_jobs),
         "pre_dedup_count":    pre_dedup_count,
         "duplicates_dropped": pre_dedup_count - len(deduped_jobs),
         "source_stats":       source_stats_total,
-        "profiles_searched":  [p.title for p in state.confirmed_profiles],
+        "profiles_searched":  confirmed_titles,
+        "variant_searches":   variant_searches,
     }
 
     # One-line per-source summary at INFO so it is visible in the docker logs.
@@ -363,7 +364,7 @@ async def node_job_search(state: dict) -> dict:
     LangGraph node wrapper for the job search agent.
     Defined as async so LangGraph runs it directly in the
     existing event loop -- avoids asyncio.run() conflict
-    with FastAPI/uvicorn's running loop.
+    with FastAPI/uvicorn running loop.
     """
     session = SessionState(**state)
 

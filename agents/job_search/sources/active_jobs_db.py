@@ -36,7 +36,6 @@ _PAGE_SIZE = 10   # conservative — stay within 250/month job cap
 async def search_active_jobs_db(
     profile_title: str,
     location:      str,
-    work_type:     str,
     num_pages:     int = 1,
 ) -> list[dict[str, Any]]:
     """

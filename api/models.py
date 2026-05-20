@@ -22,8 +22,7 @@ class APIError(BaseModel):
 # ── POST /sessions ────────────────────────────────────────────────────────────
 
 class CreateSessionRequest(BaseModel):
-    location: Optional[str] = Field(None, description="Preferred job location, e.g. 'Bangalore'. Null for remote.")
-    work_type: Literal["office", "remote", "hybrid", "on-site", "any"] = "any"
+    location: Optional[str] = Field(None, description="Preferred job location, e.g. 'Bangalore'. Required — all searches use city context.")
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
 
 
@@ -148,11 +147,9 @@ class ResultsResponse(BaseModel):
     jobs: list[JobResult]
     watch_list: list[HiringSignalResult] = Field(default_factory=list)
     message: str
+    # Pipeline observability: session_metrics.quality dict from MLflow logger.
+    # Includes per-stage job counts (jobs_by_stage), fallback flag, etc.
+    session_metrics: Optional[dict] = None
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
-
-class HealthResponse(BaseModel):
-    status: Literal["ok", "degraded"]
-    version: str = "0.1.0"
-    agents_ready: bool = True
+# ── Health check ──────────────────────────────────────────────────────────�
