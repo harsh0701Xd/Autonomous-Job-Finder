@@ -59,6 +59,7 @@ services:
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-autonomous-job-finder}
       - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      - MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,6 +136,7 @@ services:
       --port 5000
       --backend-store-uri postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
       --default-artifact-root /mlflow/artifacts
+      --serve-artifacts
       --workers 1
       --disable-security-middleware
     volumes:
