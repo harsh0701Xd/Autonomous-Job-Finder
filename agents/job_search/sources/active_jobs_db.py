@@ -22,21 +22,37 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
+from agents.job_search.quality_gates import (
+    clean_text, is_english, is_jd_sufficient, make_job_id, parse_date,
+)
+from core.state.session_state import RawJob
+
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://active-jobs-db.p.rapidapi.com/active-ats-1h"
-_TIMEOUT  = 20.0
+# ---------------------------------------------------------------------------
+# Source descriptor — read by registry.py to build the SOURCES list.
+# ---------------------------------------------------------------------------
+SOURCE_SPEC = {
+    "name":              "active_jobs_db",
+    "env_key":           "ACTIVE_JOBS_DB_API_KEY",
+    "always_on":         False,
+    "requires_location": True,
+}
+
+_BASE_URL  = "https://active-jobs-db.p.rapidapi.com/active-ats-1h"
+_TIMEOUT   = 20.0
 _PAGE_SIZE = 10   # conservative — stay within 250/month job cap
 
 
-async def search_active_jobs_db(
+async def search(
     profile_title: str,
     location:      str,
-    num_pages:     int = 1,
+    pages:         int,
+    **kwargs,
 ) -> list[dict[str, Any]]:
     """
     Search Active Jobs DB for jobs matching profile_title + location.
@@ -55,7 +71,7 @@ async def search_active_jobs_db(
     all_jobs: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        for page in range(num_pages):
+        for page in range(pages):
             params: dict[str, Any] = {
                 "title_filter":    profile_title,
                 "location_filter": f'"{location}"',
@@ -99,10 +115,67 @@ async def search_active_jobs_db(
 
             if len(jobs) == 0:
                 break
-            if page < num_pages - 1:
+            if page < pages - 1:
                 await asyncio.sleep(0.3)
 
     logger.info(
         f"[active_jobs_db] Complete — {len(all_jobs)} raw jobs for '{profile_title}'"
     )
     return all_jobs
+
+
+def normalize(raw: dict, matched_profile: str) -> Optional[RawJob]:
+    """
+    Normalize an Active Jobs DB (Fantastic Jobs) response object into RawJob.
+
+    Active Jobs DB uses the Fantastic Jobs schema:
+      id, title, organization, description (FULL text when description_type=text),
+      url, date_posted, locations_raw (list), remote_derived,
+      min_annual_salary, max_annual_salary
+    """
+    try:
+        job_id    = str(raw.get("id") or "")
+        title     = (raw.get("title") or "").strip()
+        company   = (raw.get("organization") or "").strip()
+        apply_url = (raw.get("url") or "").strip()
+
+        if not job_id or not title or not apply_url:
+            return None
+
+        jd_text = clean_text(raw.get("description") or "")
+
+        if not is_jd_sufficient(jd_text, title, company):
+            return None
+        if not is_english(jd_text, title, company):
+            return None
+
+        # Location from locations_raw list
+        locations_raw = raw.get("locations_raw") or []
+        if locations_raw and isinstance(locations_raw, list):
+            first_loc = locations_raw[0]
+            location  = (
+                first_loc.get("location") or
+                first_loc.get("city") or
+                "Not specified"
+            ) if isinstance(first_loc, dict) else str(first_loc)
+        else:
+            location = raw.get("location") or "Not specified"
+
+        work_type = "remote" if raw.get("remote_derived", False) else "office"
+
+        return RawJob(
+            job_id          = make_job_id("active_jobs_db", job_id),
+            title           = title,
+            company         = company,
+            location        = location,
+            work_type       = work_type,
+            jd_text         = jd_text,
+            apply_url       = apply_url,
+            source          = "active_jobs_db",
+            posted_date     = parse_date(raw.get("date_posted")),
+            matched_profile = matched_profile,
+        )
+
+    except Exception as e:
+        logger.warning(f"[active_jobs_db] Failed to normalize job: {e}")
+        return None

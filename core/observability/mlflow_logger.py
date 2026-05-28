@@ -2,20 +2,23 @@
 core/observability/mlflow_logger.py
 
 Logs SessionMetrics to MLflow using file-based tracking (no server required).
-Creates /app/mlruns inside Docker (volume-mounted to project root on host).
-Run `mlflow ui --backend-store-uri ./mlruns --port 5001` locally to view.
+Creates ./mlruns relative to the app working directory (volume-mounted to
+project root on host when running in Docker).
+Run `python -m mlflow ui --backend-store-uri ./mlruns --port 5001` locally to view.
 
 Fail-open: MLflow errors never block the pipeline.
 
 Environment variables:
-  MLFLOW_TRACKING_URI : override tracking URI (default: file:///app/mlruns)
+  MLFLOW_TRACKING_URI : override tracking URI (default: auto-resolved ./mlruns)
   MLFLOW_EXPERIMENT   : override experiment name (default: autonomous-job-finder)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,11 +27,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT",    "autonomous-job-finder")
-_TRACKING_URI    = os.getenv("MLFLOW_TRACKING_URI",  "file:///app/mlruns")
+_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT", "autonomous-job-finder")
+
+# Resolve tracking URI: use env var if set, otherwise build an absolute
+# file:// URI from the current working directory so artifacts are always
+# written to a path that is accessible both inside Docker (cwd=/app) and
+# locally (cwd=project root). This avoids the hard-coded /app/mlruns path
+# that broke artifact display in the MLflow UI when viewed from the host.
+_default_mlruns = Path(os.getcwd()) / "mlruns"
+_TRACKING_URI    = os.getenv("MLFLOW_TRACKING_URI", _default_mlruns.as_uri())
 
 
-def log_session_metrics(metrics: "SessionMetrics") -> None:
+def log_session_metrics(
+    metrics: "SessionMetrics",
+    job_audit: list | None = None,
+) -> None:
     """
     Log a completed SessionMetrics to MLflow.
 
@@ -37,8 +50,8 @@ def log_session_metrics(metrics: "SessionMetrics") -> None:
       total_input/output_tokens, per-agent latency + cost + tokens,
       quality metrics (raw_jobs_fetched, ranked_jobs, mean_fit_score, etc.)
 
-    Artifact:
-      session_metrics.json -- full to_dict() payload
+    Artifacts (stored in the run's artifact directory under mlruns/):
+      job_audit.json -- per-job filter decisions and LLM scores (if provided)
 
     Safe if mlflow not installed -- logs a warning and returns.
     """
@@ -85,15 +98,24 @@ def log_session_metrics(metrics: "SessionMetrics") -> None:
                 mlflow.log_metric(f"tokens_out_{agent}", usage.get("output_tokens", 0))
                 mlflow.log_metric(f"llm_calls_{agent}",  usage.get("llm_calls", 0))
 
-            # Quality metrics
+            # Quality metrics (scalar values only -- lists/dicts excluded)
             for key, value in payload.get("quality", {}).items():
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(f"quality_{key}", value)
 
-            # Note: artifact logging skipped intentionally.
-            # MLflow resolves artifact root as a local path (/mlflow/artifacts)
-            # which is only mounted in the MLflow container, not the API container.
-            # All metrics are already logged above -- the artifact would be redundant.
+            # Per-job audit artifact -- written to a temp directory as job_audit.json
+            # and logged so it lives inside the run directory under mlruns/.
+            # View in MLflow UI: run page -> Artifacts tab -> job_audit.json
+            if job_audit:
+                try:
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        artifact_file = os.path.join(tmp_dir, "job_audit.json")
+                        with open(artifact_file, "w") as fh:
+                            json.dump(job_audit, fh, indent=2, default=str)
+                        mlflow.log_artifact(artifact_file, artifact_path="")
+                    logger.info(f"[mlflow] Logged job_audit.json ({len(job_audit)} entries)")
+                except Exception as artifact_err:
+                    logger.warning(f"[mlflow] Failed to log job_audit artifact: {artifact_err}")
 
         logger.info(
             f"[mlflow] Logged session {metrics.session_id[:8]} -- "

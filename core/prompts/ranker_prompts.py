@@ -23,6 +23,9 @@ Scoring dimensions returned by LLM:
   india_accessible   true if the role is accessible to India-based remote candidates;
                      false only when JD explicitly requires US work auth / residency
                      or states no visa sponsorship. Non-remote jobs: always true.
+  job_location_extracted  actual job location extracted from JD text (more reliable
+                     than API metadata). null when location is not stated or role
+                     is fully remote with no city restriction.
 
 Weight formula -- two sets, selected per-job:
   WITH education requirement:
@@ -121,6 +124,28 @@ DOMAIN MATCH (domain_match):
   0.3   unrelated domain -- candidate would need to learn the industry from scratch
   0.5   domain cannot be determined from the JD or candidate profile
 
+OVERQUALIFICATION (overqualified):
+  Is the candidate significantly overqualified for this role?
+  true  = the role is clearly entry-level, trainee, or junior (0–2yr typical requirement)
+          AND the candidate's seniority and experience are meaningfully above that level.
+          e.g. a mid-level professional with 1.5yr full-time at a major company applying
+          for a "Trainee Analyst" or "Associate I" role intended for fresh graduates.
+  false = the candidate is appropriately qualified, underqualified, or only slightly above
+          the requirement. Most roles should return false.
+          e.g. a 1.7yr candidate applying for a 2–5yr role → false (slight gap, not overqualified).
+  When in doubt, return false. Only return true for clear-cut mismatches where the role
+  is visibly below the candidate's current level.
+
+SPARSE JD (sparse_jd):
+  Does this job description contain enough detail to assess the candidate's fit?
+  true  = the JD is too thin to score with confidence -- it lacks specifics on requirements,
+          responsibilities, or required skills. Examples: generic one-paragraph posts,
+          placeholder text, or listings that only state a job title, location, and salary
+          with no meaningful content about what the role actually requires.
+  false = the JD contains enough information to meaningfully score experience, skills,
+          and domain fit. Most JDs should return false.
+  Only return true for clearly inadequate descriptions where scoring is guesswork.
+
 INDIA ACCESSIBLE (india_accessible):
   Is this role accessible to a candidate based in India working remotely?
   This field applies ONLY to remote jobs (work_type=remote or no location restriction).
@@ -135,20 +160,39 @@ INDIA ACCESSIBLE (india_accessible):
 
   Be conservative: only return false when the exclusion is explicit and unambiguous.
 
+JOB LOCATION (job_location_extracted):
+  Extract the actual job location city/region directly from the job description text.
+  This is more reliable than API metadata -- use what the JD itself states.
+
+  Return the most specific location mentioned (city preferred over region/country).
+  Normalise to a clean string. Examples:
+    "Gurgaon", "Bengaluru", "Mumbai", "Delhi NCR", "Hyderabad", "Pune", "Chennai",
+    "Bengaluru / Remote", "Gurgaon or Remote", "Remote - India", "Remote"
+
+  Return null if:
+  - The role is fully remote with no city or region restriction stated
+  - The JD does not mention any specific location anywhere in the text
+  - The location is genuinely ambiguous (e.g. "various locations")
+  Do NOT infer location from the company name, company HQ, or industry context.
+  Do NOT return a location if you are not confident it is explicitly stated in the JD.
+
 Return this exact JSON structure:
 {{
-  "title_relevance":    float,
-  "education_required": boolean,
-  "education_match":    float | null,
-  "experience_match":   float,
-  "skill_match":        float,
-  "domain_match":       float,
-  "india_accessible":   boolean,
-  "scoring_notes":      string,
-  "experience_gap":     string | null,
-  "skill_gaps":         [string],
-  "domain_gap":         string | null,
-  "education_gap":      string | null
+  "title_relevance":        float,
+  "education_required":     boolean,
+  "education_match":        float | null,
+  "experience_match":       float,
+  "skill_match":            float,
+  "domain_match":           float,
+  "overqualified":          boolean,
+  "sparse_jd":              boolean,
+  "india_accessible":       boolean,
+  "job_location_extracted": string | null,
+  "scoring_notes":          string,
+  "experience_gap":         string | null,
+  "skill_gaps":             [string],
+  "domain_gap":             string | null,
+  "education_gap":          string | null
 }}
 
 education_gap: If education_required=true and candidate does not fully meet

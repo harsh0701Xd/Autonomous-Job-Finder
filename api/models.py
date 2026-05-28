@@ -112,6 +112,12 @@ class JobResult(BaseModel):
     matched_via: list[str] = Field(default_factory=list)
     matched_profile: str = ""
 
+    # HyDE section — drives results UI grouping
+    # "S1" → "Roles in your domain"  |  "S2" → "Broader opportunities"
+    hyde_section:    Optional[str]   = None
+    jd1_emb_score:   Optional[float] = None
+    jd2_emb_score:   Optional[float] = None
+
     # Composite score
     fit_score: float = 0.0
 
@@ -131,25 +137,23 @@ class JobResult(BaseModel):
     education_gap: Optional[str] = None
 
 
-class HiringSignalResult(BaseModel):
-    company: str
-    signal_type: str
-    signal_strength: Literal["high", "medium", "low"]
-    summary: str
-    source_url: str
-    source_date: str
-    hiring_momentum_score: float
-
-
 class ResultsResponse(BaseModel):
     session_id: str
     total_jobs: int
-    jobs: list[JobResult]
-    watch_list: list[HiringSignalResult] = Field(default_factory=list)
+    # Sectioned output from HyDE prefilter
+    section1_jobs: list[JobResult] = Field(default_factory=list)   # "Roles in your domain"
+    section2_jobs: list[JobResult] = Field(default_factory=list)   # "Broader opportunities"
+    # Backward-compatible flat list: S1 + S2 concatenated (for clients not yet section-aware)
+    jobs: list[JobResult] = Field(default_factory=list)
     message: str
     # Pipeline observability: session_metrics.quality dict from MLflow logger.
     # Includes per-stage job counts (jobs_by_stage), fallback flag, etc.
     session_metrics: Optional[dict] = None
 
 
-# ── Health check ──────────────────────────────────────────────────────────�
+# ── Health check ──────────────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    status: Literal["ok", "degraded"]
+    version: str = "0.1.0"
+    agents_ready: bool = True

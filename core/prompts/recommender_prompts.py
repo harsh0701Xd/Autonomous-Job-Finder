@@ -35,11 +35,21 @@ Rules:
     "low"     aspirational, significant gap exists
 - search_variants: up to 2 common alternative job titles used in postings for the
   same role (abbreviations, industry synonyms, equally common alternate phrasings).
-  These are used internally for job search API queries only — never shown to the user.
+  These are used internally for job search API queries only -- never shown to the user.
   Leave as [] if the main title is already universal (e.g. "Software Engineer").
-  Examples: "ML Engineer" -> ["Machine Learning Engineer", "AI Engineer"]
-            "Data Scientist" -> ["Applied Scientist"]
-            "Backend Engineer" -> ["Backend Developer", "Server-Side Engineer"]
+  CRITICAL: variants must be lateral synonyms at the SAME seniority level -- never
+  a different seniority level. Do NOT put "Lead Data Scientist" or "Principal Data
+  Scientist" as variants for "Senior Data Scientist" -- those are different levels,
+  not synonyms. Do NOT invent obscure titles that rarely appear in real job postings.
+  Good examples:
+    "ML Engineer"            -> ["Machine Learning Engineer", "AI Engineer"]
+    "Senior Data Scientist"  -> ["Staff Data Scientist"]
+    "Data Scientist"         -> ["Applied Scientist"]
+    "Backend Engineer"       -> ["Backend Developer", "Server-Side Engineer"]
+    "NLP Engineer"           -> ["NLP Scientist", "Computational Linguist"]
+  Bad examples (DO NOT do this):
+    "Senior Data Scientist"  -> ["Lead Data Scientist", "Principal Data Scientist"]  <- wrong seniority
+    "NLP Engineer"           -> ["Language Model Engineer"]  <- obscure, rarely posted
 
 Return ONLY a valid JSON array. No explanation, no markdown, no code fences.
 

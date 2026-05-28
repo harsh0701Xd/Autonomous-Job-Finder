@@ -5,6 +5,7 @@ langgraph-checkpoint-postgres>=0.0.1
 # LLM
 anthropic>=0.30.0
 langsmith>=0.1.0
+voyageai>=0.2.3          # HyDE prefilter embeddings (Agent 5b)
 
 # Resume parsing
 pymupdf>=1.24.0
@@ -30,6 +31,7 @@ python-dotenv>=1.0.0
 
 # Utilities
 tenacity>=8.3.0
+rank-bm25>=0.2.2              # HyDE prefilter RRF fusion (BM25 keyword scoring)
 
 # Observability
 mlflow>=2.14.0

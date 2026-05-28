@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from datetime import datetime
 
 
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 # Sub-schemas: Resume Parser output
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SkillSet(BaseModel):
     technical: list[str] = Field(default_factory=list)
@@ -61,7 +61,7 @@ class CandidateProfile(BaseModel):
     education: list[Education] = Field(default_factory=list)
     work_experience: list[WorkExperience] = Field(default_factory=list)
 
-    # ATS summary  Claude-written narrative, primary input for ranker scoring
+    # ATS summary -- Claude-written narrative, primary input for ranker scoring
     ats_summary: Optional[str] = None
 
     career_trajectory: Optional[
@@ -73,9 +73,9 @@ class CandidateProfile(BaseModel):
     raw_text: Optional[str] = None
 
 
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 # Sub-schemas: Profile Recommender output
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SuggestedProfile(BaseModel):
     title: str
@@ -90,9 +90,9 @@ class SuggestedProfile(BaseModel):
     search_variants: list[str] = Field(default_factory=list)
 
 
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 # Sub-schemas: Job Search output
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RawJob(BaseModel):
     job_id: str
@@ -106,10 +106,19 @@ class RawJob(BaseModel):
     posted_date: Optional[datetime] = None
     matched_profile: str                # which confirmed profile triggered this
 
+    # HyDE prefilter fields -- set by Agent 5b (hyde_agent.py)
+    # hyde_section: "S1" = "Roles in your domain", "S2" = "Broader opportunities"
+    # None means the job has not yet passed through the HyDE prefilter.
+    hyde_section:  Optional[Literal["S1", "S2"]] = None
+    jd1_emb_score: Optional[float] = None   # cosine(job_jd, hypo_jd1)
+    jd2_emb_score: Optional[float] = None   # cosine(job_jd, hypo_jd2)
+    rrf_jd1:       Optional[float] = None   # RRF-fused score using jd1 signal
+    rrf_jd2:       Optional[float] = None   # RRF-fused score using jd2 signal
 
-# 
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sub-schemas: Ranker output
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RankedJob(BaseModel):
     job_id: str
@@ -124,10 +133,15 @@ class RankedJob(BaseModel):
     matched_via: list[str] = Field(default_factory=list)
     matched_profile: str = ""              # which confirmed profile this job ranked under
 
-    # Composite score  displayed as overall fit % to the user
+    # HyDE section -- flows through from RawJob
+    hyde_section:  Optional[Literal["S1", "S2"]] = None
+    jd1_emb_score: Optional[float] = None
+    jd2_emb_score: Optional[float] = None
+
+    # Composite score -- displayed as overall fit % to the user
     fit_score: float = 0.0
 
-    # Sub-scores  all displayed to user on job card
+    # Sub-scores -- all displayed to user on job card
     experience_score: float = 0.0
     skill_score: float = 0.0
     domain_score: float = 0.0
@@ -140,7 +154,7 @@ class RankedJob(BaseModel):
     # ranker.min_title_relevance in llm_config.yaml. Not included in fit_score.
     title_relevance: Optional[float] = None
 
-    # Scoring notes + gap analysis from Claude (zero extra API cost  same call)
+    # Scoring notes + gap analysis from Claude (zero extra API cost -- same call)
     scoring_notes: str = ""
     experience_gap: Optional[str] = None      # e.g. "Requires 5yr, candidate has 0.8yr"
     skill_gaps: list[str] = Field(default_factory=list)   # e.g. ["Kubernetes", "dbt"]
@@ -153,47 +167,36 @@ class RankedJob(BaseModel):
     # Non-remote jobs are always True (location is handled by E3 filter).
     india_accessible: bool = True
 
-    # Sparse JD flag -- set True when the JD has fewer words than
-    # ranker.sparse_jd_word_threshold. fit_score is capped at
-    # ranker.sparse_jd_fit_score_cap to prevent near-empty JDs from
-    # topping the leaderboard with inflated neutral scores.
+    # LLM-extracted job location from JD text -- more reliable than API metadata.
+    # None if the JD states no specific location or role is fully remote.
+    # The location filter uses this first, falling back to the metadata location field.
+    job_location_extracted: Optional[str] = None
+
+    # Sparse JD flag -- set True by the ranker LLM when the job description
+    # lacks sufficient detail to score the candidate's fit with confidence.
+    # Surfaced as a UI banner on the job card. No score cap applied --
+    # sparse jobs are filtered by the min_fit_score gate.
     sparse_jd: bool = False
 
-
-# 
-# Sub-schemas: Hiring Signals output
-# 
-
-class HiringSignal(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    company:              str
-    signal_type:          Literal[
-        "funding", "expansion", "product_launch",
-        "headcount_growth", "hiring_freeze", "layoff", "neutral"
-    ]
-    signal_strength:      Literal["high", "medium", "low"]
-    summary:              str
-    is_positive:          bool = True
-    confidence:           float = 0.5
-    source_url:           str = ""
-    source_date:          Optional[datetime] = None
-    source_name:          str = ""
-    jobs_you_matched:     int = 0        # ties signal back to user's ranked results
-    relevant_to_profiles: list[str] = Field(default_factory=list)
+    # Overqualification flag -- set True by the ranker LLM when the candidate
+    # is significantly more senior than the role requires (e.g. a 1.7yr
+    # professional applying for an entry-level trainee position).
+    # Does NOT affect fit_score or rank -- used only to surface a UI note.
+    overqualified: Optional[bool] = None
 
 
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 # User preferences (Step 1 input)
-# 
+# ─────────────────────────────────────────────────────────────────────────────
 
 class UserPreferences(BaseModel):
     location: Optional[str] = None
     seniority_preference: Literal["same_level", "step_up", "open"] = "open"
 
 
-# 
-# Master session state  the LangGraph state object
-# 
+# ─────────────────────────────────────────────────────────────────────────────
+# Master session state -- the LangGraph state object
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SessionState(BaseModel):
     """
@@ -225,12 +228,13 @@ class SessionState(BaseModel):
     # Step 4: Job search output
     raw_jobs: list[RawJob] = Field(default_factory=list)
 
-    # Step 5: Ranked output
-    ranked_jobs: list[RankedJob] = Field(default_factory=list)
+    # Step 5a/5b: HyDE prefilter -- hypothetical JDs generated by Agent 5b
+    # Stored in state so they can be inspected / logged post-run.
+    hypo_jd1: Optional[str] = None   # domain-anchored hypothetical JD
+    hypo_jd2: Optional[str] = None   # transferable-skills hypothetical JD
 
-    # Step 6: Hiring signals
-    hiring_signals: list[HiringSignal] = Field(default_factory=list)
-    watch_list:     list[HiringSignal] = Field(default_factory=list)
+    # Step 6: Ranked output
+    ranked_jobs: list[RankedJob] = Field(default_factory=list)
 
     # Step 7: Final assembled payload ready for frontend
     results_ready: bool = False
@@ -239,4 +243,34 @@ class SessionState(BaseModel):
     current_agent: Optional[str] = None
     error: Optional[str] = None
 
-    # Zero-results 
+    # Zero-results fallback -- set by HyDE agent when floor is relaxed to fallback_floor
+    fallback_activated: bool = False
+    fallback_reason: Optional[str] = None
+
+    # Per-job pipeline audit -- populated by each stage as jobs flow through.
+    # Keyed by job_id. Each entry tracks the full journey of one job:
+    #   identity fields (title, company, source, jd_word_count, ...)
+    #   status: "passed" | "dropped"
+    #   dropped_at: None | "url_pruner" | "dedup" | "hyde_floor" |
+    #               "exp_filter" | "title_filter" | "location_filter" |
+    #               "india_accessible_filter"
+    #   drop_reason: human-readable reason string
+    #   HyDE fields: jd1_emb_score, jd2_emb_score, hyde_section
+    #   Ranker fields: fit_score, experience_score, title_relevance, etc.
+    #   final_rank: 1-based rank in the final output (None if dropped)
+    pipeline_audit: dict = Field(default_factory=dict)
+
+    # Observability -- populated by each agent, read by graph.py at END
+    # Each key is an agent name, value is an AgentMetrics dict (from metrics.py)
+    agent_metrics: dict = Field(default_factory=dict)
+
+    # Full serialised SessionMetrics -- written at pipeline END, stored in Postgres
+    session_metrics: Optional[dict] = None
+
+    pipeline_complete: bool = False
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, v: datetime) -> str:
+        return v.isoformat()

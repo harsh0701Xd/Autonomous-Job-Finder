@@ -25,7 +25,7 @@ import streamlit as st
 
 API_BASE_URL  = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 POLL_INTERVAL = 2
-MAX_POLLS     = 75   # 150s ceiling — avoids collision with uvicorn timeout-keep-alive=120s
+MAX_POLLS     = 150  # 300s ceiling -- pipeline can take 150-200s; BackgroundTask design means no server-side timeout risk
 
 st.set_page_config(
     page_title  = "Autonomous Job Finder",
@@ -134,17 +134,41 @@ def show_onboarding():
 
         seniority = st.selectbox(
             "Seniority target",
-            ["step_up", "same_level"],
+            ["same_level", "step_up"],
             format_func=lambda x: {
-                "step_up":    "Step up",
-                "same_level": "Same level",
+                "same_level": "Find roles that match who I am now",
+                "step_up":    "Find roles that match who I'm becoming",
             }[x],
         )
-        st.caption(
-            '"Same" shows roles you\'re qualified for today. '
-            '"Step up" includes stretch roles where you may not meet every requirement '
-            '— expect fewer matches.'
-        )
+
+        if seniority == "same_level":
+            st.markdown(
+                '<div style="background:#EAF3DE;border:0.5px solid #A8D08D;border-radius:8px;'
+                'padding:10px 14px;margin-top:4px">'
+                '<p style="font-size:12px;font-weight:600;color:#3B6D11;margin:0 0 4px">✅ Roles you\'re ready for now</p>'
+                '<p style="font-size:12px;color:#3B6D11;margin:0;line-height:1.5">'
+                'Shows jobs where your current experience is a strong, credible match. '
+                'Best for candidates with <strong>2+ years</strong> of full-time experience '
+                'who want lateral moves or a better company — not a level change. '
+                'Expect a tighter, higher-quality shortlist.'
+                '</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#FFF8E6;border:0.5px solid #FFD080;border-radius:8px;'
+                'padding:10px 14px;margin-top:4px">'
+                '<p style="font-size:12px;font-weight:600;color:#854F0B;margin:0 0 4px">🚀 Roles you\'re growing into</p>'
+                '<p style="font-size:12px;color:#854F0B;margin:0;line-height:1.5">'
+                'Opens the search one rung above your current level. '
+                'Best for candidates with <strong>under 1.5 years</strong> of experience, '
+                'those switching domains, or anyone who ran a previous search and got very few results. '
+                'Roles are still ranked by skill and domain fit — the experience bar is just set lower.'
+                '</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
 
@@ -170,7 +194,7 @@ def _run_onboarding(uploaded, location, seniority):
     MAX_BYTES = 10 * 1024 * 1024
     if uploaded.size > MAX_BYTES:
         st.error(
-            f"Your file is {uploaded.size // (1024*1024)} MB — the limit is 10 MB. "
+            f"Your file is {uploaded.size // (1024*1024)} MB -- the limit is 10 MB. "
             "Try compressing the PDF or removing embedded images before uploading."
         )
         return
@@ -198,7 +222,7 @@ def _run_onboarding(uploaded, location, seniority):
             st.error(f"Unexpected error creating session: {e}")
             return
 
-    with st.spinner("Parsing your resume with Claude Sonnet… (15–20 seconds)"):
+    with st.spinner("Parsing your resume with Claude Sonnet... (15-20 seconds)"):
         try:
             filename = uploaded.name
             if filename.lower().endswith(".pdf"):
@@ -286,7 +310,7 @@ def show_confirmation():
             "This can happen if the resume is very short or in an unsupported format. "
             "Please start over and try a different file."
         )
-        if st.button("↩ Start over", key="empty_profiles_restart"):
+        if st.button("Start over", key="empty_profiles_restart"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             _init_state()
@@ -306,7 +330,7 @@ def show_confirmation():
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # Per-profile cards — always show rationale, highlight selected
+    # Per-profile cards -- always show rationale, highlight selected
     for i, p in enumerate(profiles):
         is_selected = (i == selected_index)
         confidence_color = {"high": "#3B6D11", "medium": "#854F0B", "low": "#A32D2D"}.get(
@@ -350,13 +374,13 @@ def show_confirmation():
         st.caption(f"1 profile selected")
 
     if st.button(
-        f"Search jobs for {selected_profile['title']} →",
+        f"Search jobs for {selected_profile['title']} ->",
         type="primary",
         use_container_width=True,
     ):
         _run_confirmation(selected_titles=[selected_profile["title"]])
 
-    if st.button("↩ Start over", use_container_width=True):
+    if st.button("Start over", use_container_width=True):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         _init_state()
@@ -364,7 +388,7 @@ def show_confirmation():
 
 
 def _run_confirmation(selected_titles: list):
-    with st.spinner("Confirming your profile…"):
+    with st.spinner("Confirming your profile..."):
         try:
             _api_post(
                 f"/sessions/{st.session_state.session_id}/confirm",
@@ -381,7 +405,7 @@ def _run_confirmation(selected_titles: list):
             return
         except httpx.TimeoutException:
             st.error(
-                "The request timed out. The pipeline may still be running — "
+                "The request timed out. The pipeline may still be running -- "
                 "try refreshing the page in 60 seconds to see if results are ready."
             )
             return
@@ -389,7 +413,7 @@ def _run_confirmation(selected_titles: list):
             if e.response.status_code == 409:
                 st.error("This session has already been confirmed. Try starting a new search.")
             elif e.response.status_code == 404:
-                st.error("Session not found — it may have expired. Please start over.")
+                st.error("Session not found -- it may have expired. Please start over.")
             else:
                 st.error(
                     f"Confirmation failed (HTTP {e.response.status_code}). "
@@ -401,24 +425,25 @@ def _run_confirmation(selected_titles: list):
             return
 
     st.info(
-        "**Heads up:** Fit scores are AI estimates based on keyword and domain alignment — "
+        "**Heads up:** Fit scores are AI estimates based on keyword and domain alignment -- "
         "not a guarantee of interview success. Always read the full JD before applying.",
         icon="ℹ️",
     )
 
-    AGENT_SEQUENCE = ["job_search", "url_pruner", "ranker", "finalise"]
+    AGENT_SEQUENCE = ["job_search", "url_pruner", "hyde_prefilter", "ranker", "finalise"]
     AGENT_MESSAGES = {
-        "job_search": ("🔍", "Searching job boards…", "Querying JSearch for fresh listings — takes 5–10 seconds"),
-        "url_pruner": ("🧹", "Filtering listing quality…", "Removing aggregator links and low-quality listings"),
-        "ranker":     ("⚖️", f"Scoring jobs for {selected_titles[0]}…", "Each listing scored by Claude Haiku — expect 60–90 seconds"),
-        "finalise":   ("📊", "Finalising results…", "Aggregating metrics and saving session data"),
-        "complete":   ("✅", "Done!", ""),
-        "error":      ("❌", "Pipeline error", ""),
+        "job_search":      ("🔍", "Searching job boards...",          "Querying multiple job APIs -- takes 10-15 seconds"),
+        "url_pruner":      ("🧹", "Filtering listing quality...",      "Removing aggregator links and low-quality listings"),
+        "hyde_prefilter":  ("🧠", "Ranking by semantic relevance...", "Generating hypothetical JDs and embedding all listings via Voyage AI"),
+        "ranker":          ("⚖️", f"Scoring jobs for {selected_titles[0]}...", "Each listing scored by Claude Haiku -- expect 60-90 seconds"),
+        "finalise":        ("📊", "Finalising results...",             "Aggregating metrics and saving session data"),
+        "complete":        ("✅", "Done!", ""),
+        "error":           ("❌", "Pipeline error", ""),
     }
 
     started_at     = time.time()
     network_errors = 0
-    progress       = st.progress(0, text="🔍 Searching job boards…")
+    progress       = st.progress(0, text="🔍 Searching job boards...")
     sub_caption_ph = st.empty()
     elapsed_ph     = st.empty()
 
@@ -433,14 +458,14 @@ def _run_confirmation(selected_titles: list):
                 st.error(
                     "Lost connection to the backend (3 consecutive failures). "
                     "Check that Docker is still running. "
-                    "Your results may still be processing — try refreshing in 60 seconds."
+                    "Your results may still be processing -- try refreshing in 60 seconds."
                 )
                 return
-            elapsed_ph.caption(f"⚠️ Network hiccup — retrying… ({network_errors}/3)")
+            elapsed_ph.caption(f"Network hiccup -- retrying... ({network_errors}/3)")
             continue
         except Exception:
             network_errors += 1
-            elapsed_ph.caption(f"⚠️ Status check failed — retrying… ({network_errors}/3)")
+            elapsed_ph.caption(f"Status check failed -- retrying... ({network_errors}/3)")
             if network_errors >= 5:
                 st.error("Too many status check failures. Try refreshing the page in 60 seconds.")
                 return
@@ -451,7 +476,7 @@ def _run_confirmation(selected_titles: list):
 
         icon, msg, sub = AGENT_MESSAGES.get(
             current_agent,
-            AGENT_MESSAGES.get(pipeline_status, ("⏳", "Processing…", "")),
+            AGENT_MESSAGES.get(pipeline_status, ("⏳", "Processing...", "")),
         )
 
         if current_agent in AGENT_SEQUENCE:
@@ -489,21 +514,33 @@ def _run_confirmation(selected_titles: list):
             return
     else:
         elapsed_secs = int(time.time() - started_at)
-        # One last attempt to fetch results — pipeline may have finished
-        # just as the poll loop expired
-        try:
-            final_status = _api_get(f"/sessions/{st.session_state.session_id}/status")
-            if final_status.get("results_ready") or final_status.get("status") == "complete":
-                results = _api_get(f"/sessions/{st.session_state.session_id}/results")
-                st.session_state.results = results
-                st.session_state.step    = 3
-                st.rerun()
-                return
-        except Exception:
-            pass
+        # Poll ceiling hit -- pipeline is running longer than MAX_POLLS * POLL_INTERVAL seconds.
+        # Keep checking for up to 60 more seconds before giving up, in case the pipeline
+        # finishes imminently (e.g. ranker is on its last batch).
+        progress.progress(95, text="⏳ Still running — waiting for final results...")
+        sub_caption_ph.caption("Pipeline is taking longer than expected — staying connected...")
+        for _extra in range(30):   # 30 × 2s = 60 additional seconds
+            time.sleep(POLL_INTERVAL)
+            elapsed_secs = int(time.time() - started_at)
+            elapsed_ph.caption(f"⏱ {elapsed_secs}s elapsed")
+            try:
+                final_status = _api_get(f"/sessions/{st.session_state.session_id}/status")
+                if final_status.get("results_ready") or final_status.get("status") == "complete":
+                    progress.progress(100, text="✅ Done!")
+                    sub_caption_ph.empty()
+                    elapsed_ph.caption(f"✅ Completed in {elapsed_secs}s")
+                    results = _api_get(f"/sessions/{st.session_state.session_id}/results")
+                    st.session_state.results = results
+                    st.session_state.step    = 3
+                    st.rerun()
+                    return
+                if final_status.get("status") == "error":
+                    break   # fall through to error display below
+            except Exception:
+                pass  # network hiccup during extra wait -- keep trying
         st.warning(
             f"The pipeline is taking longer than expected ({elapsed_secs}s). "
-            "**Try refreshing the page** — your results may already be ready."
+            "**Try refreshing the page** -- your results may already be ready."
         )
         return
 
@@ -523,8 +560,13 @@ def _run_confirmation(selected_titles: list):
 #  Step 3: Results dashboard
 
 def show_results():
-    results = st.session_state.results
-    jobs    = results.get("jobs", [])
+    results       = st.session_state.results
+    section1_jobs = results.get("section1_jobs", [])
+    section2_jobs = results.get("section2_jobs", [])
+    # Fallback: if server returned flat list only (old format), use it for both sections
+    all_jobs      = results.get("jobs", section1_jobs + section2_jobs)
+    if not section1_jobs and not section2_jobs:
+        section1_jobs = all_jobs   # backward-compat: treat all as S1
 
     st.markdown("""
 <style>
@@ -536,8 +578,9 @@ def show_results():
 </style>
 """, unsafe_allow_html=True)
 
-    high_fit_count   = sum(1 for j in jobs if j.get("fit_score", 0) >= 0.70)
-    medium_fit_count = sum(1 for j in jobs if 0.50 <= j.get("fit_score", 0) < 0.70)
+    total_jobs       = len(all_jobs)
+    high_fit_count   = sum(1 for j in all_jobs if j.get("fit_score", 0) >= 0.70)
+    medium_fit_count = sum(1 for j in all_jobs if 0.50 <= j.get("fit_score", 0) < 0.70)
 
     col_title, col_restart = st.columns([5, 1])
     with col_title:
@@ -549,14 +592,15 @@ def show_results():
             _init_state()
             st.rerun()
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Jobs found",   len(jobs))
-    m2.metric("Strong fit",   high_fit_count,   help="Fit score ≥ 70%")
-    m3.metric("Moderate fit", medium_fit_count, help="Fit score 50–70%")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total found",           total_jobs)
+    m2.metric("In your domain",        len(section1_jobs), help="Section 1 -- domain-matched roles")
+    m3.metric("Broader opportunities", len(section2_jobs), help="Section 2 -- transferable skill matches")
+    m4.metric("Strong fit",            high_fit_count,     help="Fit score >= 70%")
 
     st.divider()
 
-    if not jobs:
+    if not total_jobs:
         st.markdown("""
 <div style="text-align:center;padding:48px 24px;
      border:0.5px dashed var(--color-border-secondary);
@@ -565,7 +609,7 @@ def show_results():
   <p style="font-size:16px;font-weight:500;margin:0 0 8px">No matching jobs found</p>
   <p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 20px;line-height:1.6">
     The search ran successfully but no listings passed the quality filter.<br>
-    Try: a broader job title · a different city · starting a new search
+    Try: a broader job title - a different city - starting a new search
   </p>
 </div>
 """, unsafe_allow_html=True)
@@ -575,40 +619,13 @@ def show_results():
         "<p style='font-size:12px;color:var(--color-text-tertiary);"
         "background:var(--color-background-secondary);border-radius:8px;"
         "padding:8px 12px;line-height:1.5;margin-bottom:12px'>"
-        "Fit scores are AI estimates based on keyword and domain alignment — "
+        "Fit scores are AI estimates based on keyword and domain alignment -- "
         "not a guarantee of interview success. Always read the full JD before applying."
         "</p>",
         unsafe_allow_html=True,
     )
 
-    # -- Pipeline funnel summary (Task #9) ------------------------------------
-    session_metrics = results.get("session_metrics") or {}
-    quality         = session_metrics.get("quality", {})
-    stage_keys = [
-        ("stage_raw_into_ranker",              "Raw into ranker"),
-        ("stage_post_dedup",                   "After dedup"),
-        ("stage_post_skill_prefilter",         "After skill filter"),
-        ("stage_post_llm_score",               "After LLM scoring"),
-        ("stage_post_exp_filter",              "After exp filter"),
-        ("stage_post_title_filter",            "After title filter"),
-        ("stage_post_location_filter",         "After location filter"),
-        ("stage_post_india_accessible_filter", "After India filter"),
-        ("stage_final_ranked",                 "Final ranked"),
-    ]
-    funnel_data = [(label, quality[key]) for key, label in stage_keys if key in quality]
-    if funnel_data:
-        with st.expander("📊 Pipeline funnel", expanded=False):
-            fallback = quality.get("fallback_activated", 0)
-            if fallback:
-                st.warning(
-                    "⚠️ Experience filter returned 0 jobs — fallback activated "
-                    "(exp_score relaxed, title + location filters still applied).",
-                    icon="⚠️",
-                )
-            cols = st.columns(len(funnel_data))
-            for col, (label, count) in zip(cols, funnel_data):
-                col.metric(label, count)
-
+    # -- Fit score filter slider -----------------------------------------------
     col_label, col_slider, col_count = st.columns([1.2, 4, 1.2])
     with col_label:
         st.markdown(
@@ -621,22 +638,42 @@ def show_results():
             min_value=0, max_value=100, value=0, step=5,
             format="%d%%", label_visibility="collapsed",
         )
-    filtered = [j for j in jobs if int(j.get("fit_score", 0) * 100) >= min_score]
+    filtered_s1 = [j for j in section1_jobs if int(j.get("fit_score", 0) * 100) >= min_score]
+    filtered_s2 = [j for j in section2_jobs if int(j.get("fit_score", 0) * 100) >= min_score]
     with col_count:
         st.markdown(
             f"<p style='font-size:12px;color:var(--color-text-tertiary);"
-            f"padding-top:6px;text-align:right'>{len(filtered)} of {len(jobs)}</p>",
+            f"padding-top:6px;text-align:right'>"
+            f"{len(filtered_s1) + len(filtered_s2)} of {total_jobs}</p>",
             unsafe_allow_html=True,
         )
 
-    st.markdown(
-        "<p style='font-size:13px;font-weight:500;"
-        "color:var(--color-text-secondary);margin-bottom:10px'>Ranked jobs</p>",
-        unsafe_allow_html=True,
-    )
+    # -- Section 1: Roles in your domain ---------------------------------------
+    if filtered_s1:
+        st.markdown(
+            "<p style='font-size:14px;font-weight:600;"
+            "color:var(--color-text-primary);margin:16px 0 4px'>🎯 Roles in your domain</p>"
+            "<p style='font-size:12px;color:var(--color-text-secondary);margin-bottom:10px'>"
+            "These roles closely match your domain expertise and technical background.</p>",
+            unsafe_allow_html=True,
+        )
+        for job in filtered_s1:
+            _render_job_card(job)
 
-    for job in filtered:
-        _render_job_card(job)
+    # -- Section 2: Broader opportunities -------------------------------------
+    if filtered_s2:
+        st.markdown(
+            "<p style='font-size:14px;font-weight:600;"
+            "color:var(--color-text-primary);margin:24px 0 4px'>🌐 Broader opportunities</p>"
+            "<p style='font-size:12px;color:var(--color-text-secondary);margin-bottom:10px'>"
+            "These roles match your transferable skills and may span different domains.</p>",
+            unsafe_allow_html=True,
+        )
+        for job in filtered_s2:
+            _render_job_card(job)
+
+    if not filtered_s1 and not filtered_s2:
+        st.info("No jobs match the current fit score filter. Try lowering the minimum.")
 
 
 def _fit_color(pct: int) -> str:
@@ -655,7 +692,7 @@ def _posted_label(posted_date: str) -> tuple[str, str]:
         now = datetime.now(timezone.utc)
         days = (now - dt).days
 
-        absolute = dt.strftime("%d %b %Y").lstrip("0")  # e.g. "14 Apr 2026" (cross-platform)
+        absolute = dt.strftime("%d %b %Y").lstrip("0")
 
         if days == 0:    relative = "today"
         elif days == 1:  relative = "yesterday"
@@ -678,6 +715,7 @@ def _render_job_card(job: dict):
     edu_score_raw = job.get("education_score")
     edu_pct       = int(edu_score_raw * 100) if edu_required and edu_score_raw is not None else None
     sparse_jd     = job.get("sparse_jd", False)
+    overqualified = job.get("overqualified", False)
 
     score_color = _fit_color(fit_pct)
 
@@ -698,7 +736,6 @@ def _render_job_card(job: dict):
     badge_color  = "blue" if "Senior" in profile_name or "Lead" in profile_name else "gray"
     badge_html   = _badge(profile_name, badge_color) if profile_name else ""
 
-    # --- POSTING DATE: prominent, near top, both absolute and relative ---
     abs_date, rel_label = _posted_label(job.get("posted_date", ""))
     if abs_date and rel_label:
         posted_html = (
@@ -740,20 +777,28 @@ def _render_job_card(job: dict):
     apply_url = job.get("apply_url", "").replace('"', "%22").replace("{", "%7B").replace("}", "%7D")
 
     edu_tile_html = _tile("Education", edu_pct) if edu_pct is not None else ""
-    grid_cols     = 4 if edu_pct is not None else 3   # Exp, Skill, Domain (+ Edu if present)
+    grid_cols     = 4 if edu_pct is not None else 3
 
     sparse_jd_banner = (
         f'<div style="display:flex;align-items:center;gap:6px;'
         f'background:#FFF8E1;border:0.5px solid #FFD54F;'
         f'border-radius:6px;padding:6px 10px;margin:8px 0;font-size:12px;'
         f'color:#795548">'
-        f'⚠️ <strong>Sparse job description</strong> — this listing has very little detail, '
+        f'⚠️ <strong>Sparse job description</strong> -- this listing has very little detail, '
         f'so scores may not reflect your actual fit. Check the full posting before applying.'
         f'</div>'
     ) if sparse_jd else ""
 
+    overqualified_banner = (
+        f'<div style="display:flex;align-items:center;gap:6px;'
+        f'background:#FFF3E0;border:0.5px solid #FFB74D;'
+        f'border-radius:6px;padding:6px 10px;margin:8px 0;font-size:12px;'
+        f'color:#E65100">'
+        f'ℹ️ You may be overqualified for this role.'
+        f'</div>'
+    ) if overqualified else ""
+
     card_html = (
-        # --- Header row: title + fit score ---
         f'<div style="padding:14px 18px 6px 18px">'
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px">'
         f'<div style="flex:1;min-width:0">'
@@ -765,14 +810,12 @@ def _render_job_card(job: dict):
         f'<span style="color:var(--color-text-tertiary);font-size:10px">&middot;</span>'
         f'{work_type_label}'
         f'</p>'
-        # --- POSTING DATE: prominent, below company line ---
         f'{posted_html}'
         f'</div>'
         f'<div style="text-align:right;flex-shrink:0">'
         f'<p style="font-size:24px;font-weight:600;color:{score_color};margin:0">{fit_pct}%</p>'
         f'<p style="font-size:10px;color:var(--color-text-tertiary);margin:0">overall fit</p>'
         f'</div></div>'
-        # --- Score tiles (Exp, Skill, Domain, Edu) -- NO Recency ---
         f'<div style="display:grid;grid-template-columns:repeat({grid_cols},1fr);gap:6px;margin:10px 0">'
         f'{_tile("Experience", exp_pct)}'
         f'{_tile("Skills",     skill_pct)}'
@@ -780,8 +823,8 @@ def _render_job_card(job: dict):
         f'{edu_tile_html}'
         f'</div>'
         f'{sparse_jd_banner}'
+        f'{overqualified_banner}'
         f'{notes_html}'
-        # --- Footer: profile badge + apply button ---
         f'<div style="display:flex;align-items:center;justify-content:space-between;'
         f'flex-wrap:wrap;gap:8px;padding-top:10px;margin-bottom:10px;'
         f'border-top:0.5px solid var(--color-border-tertiary)">'
@@ -835,3 +878,44 @@ def _render_job_card(job: dict):
                     )
 
 
+#  Progress indicator
+
+def _show_step_indicator():
+    steps   = ["Upload", "Confirm", "Results"]
+    current = st.session_state.step
+    cols    = st.columns(len(steps))
+    for i, (col, label) in enumerate(zip(cols, steps), 1):
+        with col:
+            if i < current:
+                st.markdown(
+                    f'<p style="text-align:center;font-size:12px;color:#3B6D11"> {label}</p>',
+                    unsafe_allow_html=True,
+                )
+            elif i == current:
+                st.markdown(
+                    f'<p style="text-align:center;font-size:12px;font-weight:600;color:#185FA5"> {label}</p>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<p style="text-align:center;font-size:12px;color:#aaa"> {label}</p>',
+                    unsafe_allow_html=True,
+                )
+    st.divider()
+
+
+#  Main router
+
+def main():
+    _show_step_indicator()
+    step = st.session_state.step
+    if step == 1:
+        show_onboarding()
+    elif step == 2:
+        show_confirmation()
+    elif step == 3:
+        show_results()
+
+
+if __name__ == "__main__":
+    main()

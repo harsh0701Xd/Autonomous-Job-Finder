@@ -486,8 +486,8 @@ async def get_results(session_id: str) -> ResultsResponse:
         )
 
     # Map ranked jobs to response model
-    jobs = [
-        JobResult(
+    def _to_job_result(j) -> JobResult:
+        return JobResult(
             job_id             = j.job_id,
             title              = j.title,
             company            = j.company,
@@ -498,6 +498,9 @@ async def get_results(session_id: str) -> ResultsResponse:
             posted_date        = j.posted_date.isoformat() if j.posted_date else None,
             matched_via        = j.matched_via,
             matched_profile    = j.matched_profile,
+            hyde_section       = j.hyde_section,
+            jd1_emb_score      = j.jd1_emb_score,
+            jd2_emb_score      = j.jd2_emb_score,
             fit_score          = round(j.fit_score,          3),
             experience_score   = round(j.experience_score,   3),
             skill_score        = round(j.skill_score,        3),
@@ -511,25 +514,19 @@ async def get_results(session_id: str) -> ResultsResponse:
             domain_gap         = j.domain_gap,
             education_gap      = j.education_gap,
         )
-        for j in state.ranked_jobs
-    ]
 
-    # Map hiring signals
-    watch_list = []
-    for s in state.hiring_signals:
-        from api.models import HiringSignalResult
-        watch_list.append(HiringSignalResult(
-            company                = s.company,
-            signal_type            = s.signal_type,
-            signal_strength        = s.signal_strength,
-            summary                = s.summary,
-            source_url             = s.source_url,
-            source_date            = s.source_date.isoformat(),
-            hiring_momentum_score  = round(s.hiring_momentum_score, 3),
-        ))
+    all_job_results = [_to_job_result(j) for j in state.ranked_jobs]
+    section1_jobs   = [jr for jr in all_job_results if jr.hyde_section == "S1"]
+    section2_jobs   = [jr for jr in all_job_results if jr.hyde_section == "S2"]
+    jobs            = all_job_results   # flat list for backward compat
 
     if jobs:
-        msg = f"Found {len(jobs)} matching jobs across your selected profiles."
+        s1_count = len(section1_jobs)
+        s2_count = len(section2_jobs)
+        msg = (
+            f"Found {len(jobs)} matching jobs — "
+            f"{s1_count} in your domain, {s2_count} broader opportunities."
+        )
     elif not state.raw_jobs:
         msg = (
             "No jobs were returned from the search APIs. Likely an exhausted "
@@ -543,11 +540,12 @@ async def get_results(session_id: str) -> ResultsResponse:
         )
 
     return ResultsResponse(
-        session_id      = session_id,
-        total_jobs      = len(jobs),
-        jobs            = jobs,
-        watch_list      = watch_list,
-        message         = msg,
+        session_id    = session_id,
+        total_jobs    = len(jobs),
+        section1_jobs = section1_jobs,
+        section2_jobs = section2_jobs,
+        jobs          = jobs,
+        message       = msg,
         session_metrics = state.session_metrics,
     )
 
@@ -561,4 +559,4 @@ async def get_results(session_id: str) -> ResultsResponse:
 )
 async def health_check() -> HealthResponse:
     """Returns API health status."""
-    return Hea
+    return HealthResponse(status="ok", agents_ready=True)

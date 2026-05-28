@@ -115,28 +115,49 @@ class RankerConfig(AgentLLMConfig):
     semaphore_size:               int   = 4     # max concurrent LLM calls (shared across all sessions)
     batch_size:                   int   = 4     # jobs per asyncio.gather() call
     batch_delay_secs:             float = 8.0   # sleep between batches (seconds)
-    min_experience_score_same:    float = 0.4   # threshold when seniority_preference == same_level
+    min_experience_score_same:    float = 0.5   # threshold when seniority_preference == same_level
     min_experience_score_step_up: float = 0.3   # threshold when seniority_preference == step_up
-    min_title_relevance:          float = 0.5
-    sparse_jd_word_threshold:     int   = 150   # JDs below this word count are flagged sparse
-    sparse_jd_fit_score_cap:      float = 0.75  # max fit_score for sparse JDs
+    min_title_relevance:          float = 0.40
+    min_skill_overlap_ratio:      float = 0.0   # disabled -- HyDE prefilter supersedes keyword overlap
+    min_fit_score:                float = 0.45  # drop jobs below this fit_score
+
+
+@dataclass
+class HydePrefilterConfig:
+    """Config for Agent 5b -- HyDE prefilter (JD generation + Voyage AI embedding)."""
+    jd_gen_model:      str   = "claude-sonnet-4-6"
+    max_tokens:        int   = 1024
+    temperature:       float = 0.3
+    timeout_secs:      int   = 60
+    voyage_model:      str   = "voyage-3"
+    voyage_batch_size: int   = 128
+    hyde_min_floor:    float = 0.45   # absolute noise floor -- drops irrelevant jobs
+    fallback_floor:    float = 0.40   # retry floor when Section 1 is empty after first pass
+    s1_max_jobs:       int   = 40     # max S1 jobs passed to ranker (sorted by RRF score)
+    s2_max_jobs:       int   = 20     # max S2 jobs passed to ranker (sorted by RRF score)
+
+
+@dataclass
+class SourceConfig:
+    """Per-source enable/pages config. One entry per source in llm_config.yaml [job_search.sources]."""
+    enabled: bool = False
+    pages:   int  = 0
 
 
 @dataclass
 class JobSearchConfig:
-    num_pages:               int  = 0
-    active_jobs_db_enabled:  bool = False
-    active_jobs_db_pages:    int  = 0
-    linkedin_jobs_enabled:   bool = False
-    linkedin_jobs_pages:     int  = 0
-    techmap_enabled:         bool = False
-    techmap_pages:           int  = 0
-    jobs_search_api_enabled: bool = False
-    jobs_search_api_pages:   int  = 0
-    min_jd_chars:            int  = 200   # chars gate -- JDs below this are dropped
-    min_jd_words:            int  = 60    # word gate  -- JDs below this are dropped
-    max_jd_chars:            int  = 8000  # truncation ceiling for JD text
-    hours_old:               int  = 168   # Jobs Search API freshness window (hours)
+    num_pages:    int  = 2       # fallback pages for sources not in sources dict
+    min_jd_chars: int  = 200    # chars gate -- JDs below this are dropped
+    min_jd_words: int  = 60     # word gate  -- JDs below this are dropped
+    max_jd_chars: int  = 8000   # truncation ceiling for JD text
+    hours_old:    int  = 168    # Jobs Search API freshness window (hours)
+    # Plug-and-play source registry. Keyed by source name (matches SOURCE_SPEC["name"]).
+    # Sources absent from this dict are treated as disabled (enabled=False, pages=0).
+    sources:      dict = field(default_factory=dict)  # dict[str, SourceConfig]
+
+    def source(self, name: str) -> SourceConfig:
+        """Return SourceConfig for a named source, or a disabled default if absent."""
+        return self.sources.get(name, SourceConfig(enabled=False, pages=0))
 
 
 @dataclass
@@ -144,10 +165,10 @@ class PipelineConfig:
     resume_parser:        ResumeParserConfig
     profile_recommender:  AgentLLMConfig
     job_search:           JobSearchConfig
-    url_pruner:           AgentLLMConfig
+    hyde_prefilter:       HydePrefilterConfig
     ranker:               RankerConfig
-    signals_classifier:   AgentLLMConfig
     usd_to_inr:           float = 83.5
+
     # Maps alias title -> canonical search title.
     # Loaded from llm_config.yaml [title_canonical_map].
     # Used by recommender (dedup) and job search (query normalisation).
@@ -226,51 +247,74 @@ def _load_config() -> PipelineConfig:
         semaphore_size               = int(r.get("semaphore_size",               4)),
         batch_size                   = int(r.get("batch_size",                   4)),
         batch_delay_secs             = float(r.get("batch_delay_secs",           8.0)),
-        min_experience_score_same    = float(r.get("min_experience_score_same",    0.4)),
+        min_experience_score_same    = float(r.get("min_experience_score_same",    0.5)),
         min_experience_score_step_up = float(r.get("min_experience_score_step_up", 0.3)),
-        min_title_relevance          = float(r.get("min_title_relevance",          0.5)),
-        sparse_jd_word_threshold     = int(r.get("sparse_jd_word_threshold",       150)),
-        sparse_jd_fit_score_cap      = float(r.get("sparse_jd_fit_score_cap",      0.75)),
+        min_title_relevance          = float(r.get("min_title_relevance",          0.40)),
+        min_skill_overlap_ratio      = float(r.get("min_skill_overlap_ratio",      0.0)),
+        min_fit_score                = float(r.get("min_fit_score",                0.45)),
+    )
+
+    h = raw.get("hyde_prefilter", {})
+    hyde_cfg = HydePrefilterConfig(
+        jd_gen_model      = str(h.get("jd_gen_model",     "claude-sonnet-4-6")),
+        max_tokens        = int(h.get("max_tokens",        1024)),
+        temperature       = float(h.get("temperature",     0.3)),
+        timeout_secs      = int(h.get("timeout_secs",      60)),
+        voyage_model      = str(h.get("voyage_model",      "voyage-3")),
+        voyage_batch_size = int(h.get("voyage_batch_size", 128)),
+        hyde_min_floor    = float(h.get("hyde_min_floor",  0.45)),
+        fallback_floor    = float(h.get("fallback_floor",  0.40)),
+        s1_max_jobs       = int(h.get("s1_max_jobs",       40)),
+        s2_max_jobs       = int(h.get("s2_max_jobs",       20)),
     )
 
     js = raw.get("job_search", {})
+
+    # Parse plug-and-play source registry from job_search.sources block.
+    # Each key is a source name; value has enabled + pages.
+    sources_raw = js.get("sources", {}) or {}
+    sources: dict[str, SourceConfig] = {}
+    for src_name, src_cfg in sources_raw.items():
+        src_cfg = src_cfg or {}
+        sources[src_name] = SourceConfig(
+            enabled = bool(src_cfg.get("enabled", False)),
+            pages   = int(src_cfg.get("pages",   0)),
+        )
+
     job_search_cfg = JobSearchConfig(
-        num_pages               = int(js["num_pages"]),
-        active_jobs_db_enabled  = bool(js.get("active_jobs_db_enabled",  False)),
-        active_jobs_db_pages    = int(js.get("active_jobs_db_pages",     0)),
-        linkedin_jobs_enabled   = bool(js.get("linkedin_jobs_enabled",   False)),
-        linkedin_jobs_pages     = int(js.get("linkedin_jobs_pages",      0)),
-        techmap_enabled         = bool(js.get("techmap_enabled",         False)),
-        techmap_pages           = int(js.get("techmap_pages",            0)),
-        jobs_search_api_enabled = bool(js.get("jobs_search_api_enabled", False)),
-        jobs_search_api_pages   = int(js.get("jobs_search_api_pages",    0)),
-        min_jd_chars            = int(js.get("min_jd_chars",             200)),
-        min_jd_words            = int(js.get("min_jd_words",             60)),
-        max_jd_chars            = int(js.get("max_jd_chars",             8000)),
-        hours_old               = int(js.get("hours_old",                168)),
+        num_pages    = int(js.get("num_pages",    2)),
+        min_jd_chars = int(js.get("min_jd_chars", 200)),
+        min_jd_words = int(js.get("min_jd_words", 60)),
+        max_jd_chars = int(js.get("max_jd_chars", 8000)),
+        hours_old    = int(js.get("hours_old",    168)),
+        sources      = sources,
     )
 
     config = PipelineConfig(
         resume_parser        = _parser_agent(),
         profile_recommender  = _agent("profile_recommender"),
         job_search           = job_search_cfg,
-        url_pruner           = _agent("url_pruner"),
+        hyde_prefilter       = hyde_cfg,
         ranker               = ranker_cfg,
-        signals_classifier   = _agent("signals_classifier"),
         usd_to_inr           = float(raw.get("usd_to_inr", 90.5)),
         title_canonical_map  = dict(raw.get("title_canonical_map", {})),
     )
+
+    # Build source summary for log line
+    src_summary = " | ".join(
+        f"{name}={'on' if sc.enabled else 'off'}(p={sc.pages})"
+        for name, sc in config.job_search.sources.items()
+    ) or "no sources configured"
 
     logger.info(
         "[config] Loaded -- "
         "parser=%s temp=%s min_text_length=%s | recommender=%s temp=%s | ranker=%s temp=%s "
         "weights(edu)=%s/%s/%s/%s/%s | weights(no_edu)=%s/%s/%s/%s | "
         "min_exp_score(same)=%s min_exp_score(step_up)=%s | min_title_relevance=%s | "
-        "sparse_jd_word_threshold=%s sparse_jd_fit_score_cap=%s | "
+        "min_fit_score=%s | "
         "ranker.batch_size=%s batch_delay_secs=%s semaphore_size=%s | "
         "job_search.num_pages=%s min_jd_chars=%s min_jd_words=%s max_jd_chars=%s hours_old=%s | "
-        "active_jobs_db=%s | linkedin_jobs=%s | techmap=%s | "
-        "jobs_search_api=%s | title_canonical_map=%d entries",
+        "sources: %s | title_canonical_map=%d entries",
         config.resume_parser.model, config.resume_parser.temperature,
         config.resume_parser.min_text_length,
         config.profile_recommender.model, config.profile_recommender.temperature,
@@ -287,8 +331,7 @@ def _load_config() -> PipelineConfig:
         config.ranker.min_experience_score_same,
         config.ranker.min_experience_score_step_up,
         config.ranker.min_title_relevance,
-        config.ranker.sparse_jd_word_threshold,
-        config.ranker.sparse_jd_fit_score_cap,
+        config.ranker.min_fit_score,
         config.ranker.batch_size,
         config.ranker.batch_delay_secs,
         config.ranker.semaphore_size,
@@ -297,10 +340,7 @@ def _load_config() -> PipelineConfig:
         config.job_search.min_jd_words,
         config.job_search.max_jd_chars,
         config.job_search.hours_old,
-        "on" if config.job_search.active_jobs_db_enabled else "off",
-        "on" if config.job_search.linkedin_jobs_enabled else "off",
-        "on" if config.job_search.techmap_enabled else "off",
-        "on" if config.job_search.jobs_search_api_enabled else "off",
+        src_summary,
         len(config.title_canonical_map),
     )
     return config

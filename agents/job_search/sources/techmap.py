@@ -26,13 +26,29 @@ Note:   countryCode=in for India. title filter via ?title= query param.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
+from agents.job_search.quality_gates import (
+    clean_text, is_english, is_jd_sufficient, make_job_id, parse_date,
+)
+from core.state.session_state import RawJob
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Source descriptor — read by registry.py to build the SOURCES list.
+# ---------------------------------------------------------------------------
+SOURCE_SPEC = {
+    "name":              "techmap",
+    "env_key":           "TECHMAP_API_KEY",
+    "always_on":         False,
+    "requires_location": True,
+}
 
 _BASE_URL = "https://daily-international-job-postings.p.rapidapi.com/api/v2/jobs/search"
 _TIMEOUT  = 20.0
@@ -57,14 +73,18 @@ def _resolve_city(location: str) -> str:
     return location.strip()
 
 
-async def search_techmap(
+async def search(
     profile_title: str,
     location:      str,
-    work_type:     str,
-    num_pages:     int = 3,
+    pages:         int,
+    **kwargs,
 ) -> list[dict[str, Any]]:
     """
     Search Techmap for jobs matching profile_title + India location.
+
+    work_type can be passed via kwargs (e.g. work_type="remote").
+    Defaults to "onsite" when not provided.
+
     Returns list of raw Techmap result objects (each has a 'jsonLD' sub-dict).
     Empty list on any error.
     """
@@ -79,13 +99,14 @@ async def search_techmap(
     }
 
     city = _resolve_city(location)
-    work_place_map = {"remote": "remote", "hybrid": "hybrid", "office": "onsite"}
-    work_place = work_place_map.get(work_type.lower(), "onsite")
+    work_type_raw  = kwargs.get("work_type", "onsite")
+    work_place_map = {"remote": "remote", "hybrid": "hybrid", "office": "onsite", "any": "onsite"}
+    work_place     = work_place_map.get(str(work_type_raw).lower(), "onsite")
 
     all_jobs: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        for page in range(1, num_pages + 1):
+        for page in range(1, pages + 1):
             params: dict[str, Any] = {
                 "title":       profile_title,
                 "countryCode": "in",
@@ -128,8 +149,80 @@ async def search_techmap(
 
             if len(jobs) == 0:
                 break
-            if page < num_pages:
+            if page < pages:
                 await asyncio.sleep(0.3)
 
     logger.info(f"[techmap] Complete — {len(all_jobs)} raw jobs for '{profile_title}'")
     return all_jobs
+
+
+def normalize(raw: dict, matched_profile: str) -> Optional[RawJob]:
+    """
+    Normalize a Techmap Daily International Job Postings result into RawJob.
+
+    Techmap wraps job data in a JSON-LD sub-object (raw.jsonLD):
+      jsonLD.title, jsonLD.description (FULL), jsonLD.url,
+      jsonLD.datePosted, jsonLD.hiringOrganization.name,
+      jsonLD.jobLocation.address.addressLocality,
+      jsonLD.baseSalary.value.{minValue,maxValue}
+    Top-level shortcuts: raw.city, raw.company, raw.workPlace
+    """
+    try:
+        jld       = raw.get("jsonLD") or {}
+        title     = (jld.get("title") or raw.get("occupation") or "").strip()
+        apply_url = (jld.get("url") or "").strip()
+        company   = (
+            (jld.get("hiringOrganization") or {}).get("name") or
+            raw.get("company") or ""
+        ).strip()
+
+        if not title or not apply_url:
+            return None
+
+        jd_text = clean_text(jld.get("description") or "")
+
+        if not is_jd_sufficient(jd_text, title, company):
+            return None
+        if not is_english(jd_text, title, company):
+            return None
+
+        raw_id = (
+            str(jld.get("identifier") or "") or
+            hashlib.md5(f"{title}{company}{apply_url}".encode()).hexdigest()[:12]
+        )
+
+        job_location = jld.get("jobLocation") or {}
+        address      = job_location.get("address") or {}
+        city         = (address.get("addressLocality") or raw.get("city") or "").strip()
+        country      = (address.get("addressCountry") or "India").strip()
+        location     = ", ".join(filter(None, [city, country])) or "India"
+
+        work_place_raw = (raw.get("workPlace") or "").lower()
+        if work_place_raw == "remote":
+            work_type = "remote"
+        elif work_place_raw == "hybrid":
+            work_type = "hybrid"
+        else:
+            work_type = "office"
+
+        posted_date = None
+        date_str    = jld.get("datePosted") or raw.get("dateCreated")
+        if date_str:
+            posted_date = parse_date(str(date_str)[:10])
+
+        return RawJob(
+            job_id          = make_job_id("techmap", raw_id),
+            title           = title,
+            company         = company,
+            location        = location,
+            work_type       = work_type,
+            jd_text         = jd_text,
+            apply_url       = apply_url,
+            source          = "techmap",
+            posted_date     = posted_date,
+            matched_profile = matched_profile,
+        )
+
+    except Exception as e:
+        logger.warning(f"[techmap] Failed to normalize job: {e}")
+        return None

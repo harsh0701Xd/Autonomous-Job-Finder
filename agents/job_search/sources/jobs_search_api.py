@@ -27,15 +27,30 @@ Response fields (JobSpy-style schema):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
+from agents.job_search.quality_gates import (
+    clean_text, is_english, is_jd_sufficient, make_job_id, parse_date,
+)
 from core.config.config_loader import cfg
+from core.state.session_state import RawJob
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Source descriptor — read by registry.py to build the SOURCES list.
+# ---------------------------------------------------------------------------
+SOURCE_SPEC = {
+    "name":              "jobs_search_api",
+    "env_key":           "JOBS_SEARCH_API_KEY",
+    "always_on":         False,
+    "requires_location": True,
+}
 
 _BASE_URL = "https://jobs-search-api.p.rapidapi.com/getjobs"
 _TIMEOUT  = 30.0   # POST with description fetch can be slower
@@ -59,18 +74,19 @@ def _build_payload(
     }
 
 
-async def search_jobs_search_api(
+async def search(
     profile_title: str,
     location:      str,
-    num_pages:     int = 2,
+    pages:         int,
+    **kwargs,
 ) -> list[dict[str, Any]]:
     """
     Search Jobs Search API for jobs matching profile_title + location.
     Returns list of raw job dicts. Empty list on any error.
 
     Note: This API uses POST with a JSON body, not GET with query params.
-    Each request returns results_wanted jobs. num_pages is used to
-    make multiple calls with increasing hours_old to get more variety.
+    Each request returns results_wanted jobs. `pages` controls how many
+    POST requests are made (each fetching 10 jobs).
     """
     api_key = os.environ.get("JOBS_SEARCH_API_KEY", "")
     if not api_key:
@@ -86,7 +102,7 @@ async def search_jobs_search_api(
     all_jobs: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        for page in range(num_pages):
+        for page in range(pages):
             payload = _build_payload(profile_title, location, results=10)
 
             logger.info(
@@ -135,10 +151,60 @@ async def search_jobs_search_api(
 
             if len(jobs) == 0:
                 break
-            if page < num_pages - 1:
+            if page < pages - 1:
                 await asyncio.sleep(1.0)   # slightly longer pause — POST with fetch
 
     logger.info(
         f"[jobs_search_api] Complete — {len(all_jobs)} raw jobs for '{profile_title}'"
     )
     return all_jobs
+
+
+def normalize(raw: dict, matched_profile: str) -> Optional[RawJob]:
+    """
+    Normalize a Jobs Search API (JobSpy-style) response object into RawJob.
+
+    JobSpy schema (NOT Fantastic Jobs schema):
+      id, title, company, description (FULL when linkedin_fetch_description=True),
+      job_url, date_posted, location, is_remote,
+      min_amount, max_amount (salary)
+    """
+    try:
+        job_id    = str(raw.get("id") or "")
+        title     = (raw.get("title") or "").strip()
+        company   = (raw.get("company") or "").strip()
+        apply_url = (raw.get("job_url") or "").strip()
+
+        if not title or not apply_url:
+            return None
+
+        # Fallback ID if none provided
+        if not job_id:
+            job_id = hashlib.md5(f"{title}{company}{apply_url}".encode()).hexdigest()[:12]
+
+        jd_text = clean_text(raw.get("description") or "")
+
+        if not is_jd_sufficient(jd_text, title, company):
+            return None
+        if not is_english(jd_text, title, company):
+            return None
+
+        location  = (raw.get("location") or "Not specified").strip()
+        work_type = "remote" if raw.get("is_remote", False) else "office"
+
+        return RawJob(
+            job_id          = make_job_id("jobs_search_api", job_id),
+            title           = title,
+            company         = company,
+            location        = location,
+            work_type       = work_type,
+            jd_text         = jd_text,
+            apply_url       = apply_url,
+            source          = "jobs_search_api",
+            posted_date     = parse_date(raw.get("date_posted")),
+            matched_profile = matched_profile,
+        )
+
+    except Exception as e:
+        logger.warning(f"[jobs_search_api] Failed to normalize job: {e}")
+        return None

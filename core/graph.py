@@ -5,19 +5,29 @@ LangGraph pipeline graph -- the orchestration layer.
 
 Current pipeline:
   START
-    -> parse_resume          (Agent 1 -- Resume Parser, Claude Sonnet)
-    -> recommend_profiles    (Agent 2 -- Profile Recommender, Claude Haiku)
+    -> parse_resume          (Agent 1  -- Resume Parser, Claude Sonnet)
+    -> recommend_profiles    (Agent 2  -- Profile Recommender, Claude Haiku)
     -> [INTERRUPT: user_confirmation]
-    -> search_jobs           (Agent 3 -- Job Search, JSearch API)
-    -> prune_urls            (Agent 4 -- URL Pruner, Claude Haiku)
-    -> rank_results          (Agent 6 -- Ranker, Claude Haiku x 60 jobs)
+    -> search_jobs           (Agent 3  -- Job Search, multi-source APIs)
+    -> validate_urls         (No LLM  -- HTTP dead-link + aggregator-redirect check)
+    -> dedup                 (Agent 5a -- Deduplication, in-memory)
+    -> hyde_prefilter        (Agent 5b -- HyDE Prefilter, Sonnet + Voyage AI)
+    -> rank_results          (Agent 6  -- Ranker, Claude Haiku x ~25 jobs)
+    -> finalise              (Observability aggregation, MLflow)
     -> END
 
-Hiring signals agent (Option A -- disconnected):
-  Code preserved in agents/signals/. Removed from active graph due to
-  low signal reliability for Indian mid-market companies and sparse
-  NewsAPI coverage. Reinstate by adding node + edge when a better
-  data source is available.
+HyDE Prefilter (Agent 5b):
+  Generates two hypothetical JDs (JD1 domain-anchored, JD2 transferable) in
+  parallel via Claude Sonnet, embeds all job JDs + hypotheticals in a single
+  Voyage AI batch call, and partitions jobs into:
+    Section 1 -- "Roles in your domain"   (jd1_emb >= jd2_emb above floor)
+    Section 2 -- "Broader opportunities"  (jd2_emb >  jd1_emb above floor)
+    Dropped                              (max(jd1_emb, jd2_emb) < floor)
+
+Dedup node (Agent 5a):
+  Extracted from the ranker into its own graph node so that duplicate jobs
+  are removed BEFORE HyDE embedding, avoiding redundant Voyage calls.
+
 """
 
 from __future__ import annotations
@@ -38,9 +48,9 @@ from agents.recommender.profile_recommender import (
     run_profile_recommender,
 )
 from agents.job_search.job_search_agent import node_job_search
-from agents.pruner.url_pruner import node_url_pruner
-from agents.ranker.ranker_agent import node_ranker
-# agents.signals intentionally not imported -- Option A (disconnected, code preserved)
+from core.url_validator import node_url_validate
+from agents.hyde.hyde_agent import node_hyde_prefilter
+from agents.ranker.ranker_agent import deduplicate, node_ranker
 from core.state.session_state import SessionState
 
 logger = logging.getLogger(__name__)
@@ -118,6 +128,46 @@ def node_user_confirmation(state: dict) -> dict:
     return updated.model_dump()
 
 
+
+# -- Dedup node (Agent 5a) -----------------------------------------------------
+
+def node_dedup(state: dict) -> dict:
+    """
+    Node 5a: Deduplication.
+
+    Removes duplicate raw jobs (same company + normalised title) before the
+    HyDE embedding step. Running dedup here rather than inside the ranker
+    ensures Voyage AI does not embed the same JD text multiple times,
+    reducing both token cost and embedding latency.
+
+    Uses ranker_agent.deduplicate() which keeps the longest JD text per
+    fingerprint and merges matched_profile strings across duplicates.
+    """
+    session = SessionState(**state)
+    if not session.raw_jobs:
+        logger.warning("[graph] Skipping dedup -- no raw jobs")
+        return state
+
+    before_ids       = {j.job_id for j in session.raw_jobs}
+    before           = len(session.raw_jobs)
+    session.raw_jobs = deduplicate(session.raw_jobs)
+    after_ids        = {j.job_id for j in session.raw_jobs}
+    removed          = before - len(session.raw_jobs)
+
+    # Pipeline audit: mark fingerprint-deduped jobs as dropped
+    for jid in before_ids - after_ids:
+        if jid in session.pipeline_audit:
+            session.pipeline_audit[jid]["status"]     = "dropped"
+            session.pipeline_audit[jid]["dropped_at"] = "dedup"
+            session.pipeline_audit[jid]["drop_reason"] = "duplicate_company_title"
+
+    logger.info(
+        f"[graph:dedup] {before} -> {len(session.raw_jobs)} unique jobs "
+        + (f"({removed} duplicates removed)" if removed else "(no duplicates)")
+    )
+    return session.model_dump()
+
+
 # -- Conditional edge: should we proceed after parsing? ------------------------
 
 def route_after_parse(state: dict) -> str:
@@ -141,6 +191,14 @@ def node_finalise(state: dict) -> dict:
     Final node before END -- aggregates per-agent metrics into SessionMetrics,
     logs to MLflow, and stores the serialised payload in state.session_metrics
     for Postgres persistence by the API layer.
+
+    MLflow receives:
+      - All existing quality/latency/cost/token metrics (unchanged)
+      - Per-stage funnel counts (quality_funnel_*) and absolute drops
+        (quality_dropped_*) derived from pipeline_audit
+      - job_audit.json artifact: full per-job record with scores, HyDE
+        section, stage dropped, and drop reason for every job that entered
+        the pipeline
 
     Runs synchronously -- no LLM calls, just in-memory aggregation + I/O.
     Fail-open: any error here is logged and skipped; pipeline state is unaffected.
@@ -187,24 +245,78 @@ def node_finalise(state: dict) -> dict:
         fit_scores = [j.fit_score for j in ranked]
         raw_count  = state.get("_raw_jobs_count", len(session.raw_jobs))
 
-        # Per-stage funnel stats from ranker (Task #9)
-        ranker_metrics = session.agent_metrics.get("ranker", {})
-        jobs_by_stage  = ranker_metrics.get("jobs_by_stage", {})
-
         quality = {
-            "raw_jobs_fetched":         raw_count,
-            "ranked_jobs":              len(ranked),
-            "high_fit_count":           sum(1 for s in fit_scores if s >= 0.70),
-            "moderate_fit_count":       sum(1 for s in fit_scores if 0.50 <= s < 0.70),
-            "mean_fit_score":           round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
-            "score_p25":                round(sorted(fit_scores)[len(fit_scores)//4],   3) if len(fit_scores) >= 3 else None,
-            "score_p75":                round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
-            "fallback_activated":       int(session.fallback_activated),
-            "india_accessible_dropped": ranker_metrics.get("india_accessible_dropped", 0),
-            "pre_filter_skill_dropped": ranker_metrics.get("pre_filter_skill_dropped", 0),
-            # Per-stage counts surfaced as individual MLflow metrics for funnel analysis
-            **{f"stage_{k}": v for k, v in jobs_by_stage.items()},
+            "raw_jobs_fetched":   raw_count,
+            "ranked_jobs":        len(ranked),
+            "high_fit_count":     sum(1 for s in fit_scores if s >= 0.70),
+            "moderate_fit_count": sum(1 for s in fit_scores if 0.50 <= s < 0.70),
+            "mean_fit_score":     round(sum(fit_scores) / len(fit_scores), 3) if fit_scores else 0.0,
+            # p25/p75 are meaningless with fewer than 3 data points -- null signals
+            # "insufficient sample" to dashboards rather than a misleading value.
+            "score_p25":          round(sorted(fit_scores)[len(fit_scores)//4],   3) if len(fit_scores) >= 3 else None,
+            "score_p75":          round(sorted(fit_scores)[3*len(fit_scores)//4], 3) if len(fit_scores) >= 3 else None,
         }
+
+        # -- Pipeline audit: sort and compute per-stage funnel counts -----------
+        # Computed before metrics.finish() so funnel counts are included in the
+        # quality_* MLflow metrics namespace automatically.
+        _audit_stage_order = {
+            None:                        0,   # passed
+            "exp_filter":                1,
+            "title_filter":              2,
+            "location_filter":           3,
+            "india_accessible_filter":   4,
+            "profile_cap":               5,
+            "hyde_section_cap":          6,   # S1/S2 per-section cap (after floor)
+            "hyde_floor":                7,
+            "dedup":                     8,
+            "url_pruner":                9,
+        }
+        _audit_list = sorted(
+            session.pipeline_audit.values(),
+            key=lambda e: (
+                _audit_stage_order.get(e.get("dropped_at"), 9),
+                -(e.get("fit_score") or 0),
+            ),
+        )
+
+        _drop_counts: dict[str, int] = {}
+        for _e in _audit_list:
+            _d = _e.get("dropped_at")
+            if _d:
+                _drop_counts[_d] = _drop_counts.get(_d, 0) + 1
+
+        _total = len(_audit_list)
+        # Merge funnel + per-stage drop counts into quality so they are logged
+        # as MLflow metrics under quality_* namespace automatically.
+        quality.update({
+            "funnel_job_search":            _total,
+            "funnel_after_url_pruner":      _total - _drop_counts.get("url_pruner", 0),
+            "funnel_after_dedup":           _total - _drop_counts.get("url_pruner", 0)
+                                                   - _drop_counts.get("dedup", 0),
+            "funnel_after_hyde":            _total - sum(_drop_counts.get(k, 0) for k in
+                                                ["url_pruner", "dedup", "hyde_floor"]),
+            "funnel_after_profile_cap":     _total - sum(_drop_counts.get(k, 0) for k in
+                                                ["url_pruner", "dedup", "hyde_floor", "profile_cap"]),
+            "funnel_after_exp_filter":      _total - sum(_drop_counts.get(k, 0) for k in
+                                                ["url_pruner", "dedup", "hyde_floor", "profile_cap",
+                                                 "exp_filter"]),
+            "funnel_after_title_filter":    _total - sum(_drop_counts.get(k, 0) for k in
+                                                ["url_pruner", "dedup", "hyde_floor", "profile_cap",
+                                                 "exp_filter", "title_filter"]),
+            "funnel_after_location_filter": _total - sum(_drop_counts.get(k, 0) for k in
+                                                ["url_pruner", "dedup", "hyde_floor", "profile_cap",
+                                                 "exp_filter", "title_filter", "location_filter"]),
+            "funnel_final_ranked":          sum(1 for _e in _audit_list if _e.get("final_rank") is not None),
+            "dropped_url_pruner":           _drop_counts.get("url_pruner", 0),
+            "dropped_dedup":                _drop_counts.get("dedup", 0),
+            "dropped_hyde_floor":           _drop_counts.get("hyde_floor", 0),
+            "dropped_profile_cap":          _drop_counts.get("profile_cap", 0),
+            "dropped_exp_filter":           _drop_counts.get("exp_filter", 0),
+            "dropped_title_filter":         _drop_counts.get("title_filter", 0),
+            "dropped_location_filter":      _drop_counts.get("location_filter", 0),
+            "dropped_india_filter":         _drop_counts.get("india_accessible_filter", 0),
+        })
 
         # Total latency: sum of per-agent latencies. The pipeline is
         # sequential between agents (parallelism happens *inside* the ranker
@@ -225,8 +337,9 @@ def node_finalise(state: dict) -> dict:
         session.pipeline_complete = True
         session.results_ready     = True
 
-        # Log to MLflow (fail-open internally)
-        log_session_metrics(metrics)
+        # Log to MLflow -- funnel metrics land under quality_* and the full
+        # per-job audit list is stored as job_audit.json in the run artifact dir.
+        log_session_metrics(metrics, job_audit=_audit_list)
 
         logger.info(
             f"[graph:finalise] Metrics captured -- "
@@ -262,10 +375,11 @@ def build_graph(use_postgres: bool = False):
     builder.add_node("recommend_profiles", node_recommend_profiles)
     builder.add_node("user_confirmation",  node_user_confirmation)
     builder.add_node("search_jobs",        node_job_search)
-    builder.add_node("prune_urls",         node_url_pruner)
+    builder.add_node("validate_urls",      node_url_validate)    # HTTP dead-link + redirect check
+    builder.add_node("dedup",              node_dedup)           # Agent 5a
+    builder.add_node("hyde_prefilter",     node_hyde_prefilter)  # Agent 5b
     builder.add_node("rank_results",       node_ranker)
     builder.add_node("finalise",           node_finalise)   # observability aggregation
-    # hiring_signals intentionally excluded -- Option A. Code in agents/signals/.
 
     # Entry point
     builder.add_edge(START, "parse_resume")
@@ -284,10 +398,12 @@ def build_graph(use_postgres: bool = False):
         {"confirm": "user_confirmation", "end": END},
     )
 
-    # After confirmation -> job search -> URL prune -> rank -> finalise -> END
+    # After confirmation -> job search -> URL validate -> dedup -> hyde -> rank -> finalise -> END
     builder.add_edge("user_confirmation", "search_jobs")
-    builder.add_edge("search_jobs",       "prune_urls")
-    builder.add_edge("prune_urls",        "rank_results")
+    builder.add_edge("search_jobs",       "validate_urls")
+    builder.add_edge("validate_urls",     "dedup")            # 5a: remove duplicates first
+    builder.add_edge("dedup",              "hyde_prefilter")   # 5b: semantic partition
+    builder.add_edge("hyde_prefilter",     "rank_results")     # ranker sees ~25 jobs, not ~100
     builder.add_edge("rank_results",      "finalise")
     builder.add_edge("finalise",          END)
 
@@ -366,4 +482,23 @@ async def resume_after_confirmation(
     Resume the graph after the user has confirmed their profile selections.
     Uses ainvoke to support async nodes (e.g. job search agent).
     """
-    from langgraph.types import Comman
+    from langgraph.types import Command
+
+    config = create_session_config(session_id)
+
+    resume_payload = {
+        "selected_titles": selected_titles,
+        "custom_profiles": custom_profiles or [],
+    }
+
+    state = await graph.ainvoke(
+        Command(resume=resume_payload),
+        config=config,
+    )
+
+    logger.info(
+        f"[graph] Pipeline resumed and completed -- "
+        f"session_id={session_id}, "
+        f"confirmed={len(selected_titles)} profiles"
+    )
+    return state

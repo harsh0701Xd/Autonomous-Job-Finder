@@ -5,21 +5,18 @@ Agent 3 -- Job Search
 
 Responsibility:
   - Read confirmed_profiles[] + preferences from SessionState
-  - Run parallel searches across all sources for each profile
+  - Run parallel searches across all active sources for each profile
   - Normalize all results into RawJob objects
-  - Write raw_jobs[] to SessionState for Agent 4 (ranker)
+  - Write raw_jobs[] to SessionState for downstream agents
 
 Execution model:
-  asyncio.gather() runs all (profile x source) combinations simultaneously.
-  Total wall time ~ slowest single API call (~3-5s) not sum of all calls.
+  asyncio.gather() runs all (profile × source) combinations simultaneously.
+  Total wall time ≈ slowest single API call (~3-5s), not sum of all calls.
 
-Sources (all on separate free-tier RapidAPI keys -- quotas are independent):
-  JSearch          -- Google Jobs aggregator        JSEARCH_API_KEY
-  Active Jobs DB   -- Same schema as JSearch        ACTIVE_JOBS_DB_API_KEY
-  LinkedIn Jobs    -- LinkedIn listings             LINKEDIN_JOBS_API_KEY
-  Techmap          -- 240-country, full JDs         TECHMAP_API_KEY
-  Jobs Search API  -- Broad ATS coverage            JOBS_SEARCH_API_KEY
-  RemoteOK         -- CONDITIONAL: remote work only
+Sources are registered in agents/job_search/registry.py (SOURCES list).
+Each source exposes search() + normalize() + SOURCE_SPEC.
+Enable/disable sources and set page counts in llm_config.yaml [job_search.sources].
+API keys are set per SOURCE_SPEC["env_key"] in your .env file.
 
 Input  (from SessionState): confirmed_profiles[], preferences
 Output (to SessionState)  : raw_jobs[]
@@ -30,47 +27,89 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable, Coroutine
+from typing import Coroutine, Optional
 
-from agents.job_search.normalizer import normalize_jobs
-from agents.job_search.sources.jsearch import search_jsearch
-from agents.job_search.sources.remoteok import search_remoteok
-from agents.job_search.sources.active_jobs_db import search_active_jobs_db
-from agents.job_search.sources.linkedin_jobs import search_linkedin_jobs
-from agents.job_search.sources.techmap import search_techmap
-from agents.job_search.sources.jobs_search_api import search_jobs_search_api
+from agents.job_search.registry import SOURCES, validate_source_keys
 from core.config.config_loader import cfg
 from core.state.session_state import RawJob, SessionState
 
 logger = logging.getLogger(__name__)
 
+# Build normalizer dispatch table from registry at import time.
+# Maps source name -> normalize() function so the agent never imports
+# individual source modules directly.
+_NORMALIZERS = {m.SOURCE_SPEC["name"]: m.normalize for m in SOURCES}
 
-# -- Title canonicalisation (#12) ---------------------------------------------
+# Warn at startup about enabled sources with missing API keys.
+validate_source_keys()
+
+
+# -- Title canonicalisation ----------------------------------------------------
 
 def _canonicalize_title(title: str) -> str:
     """
     Map an alias title to its canonical search form using llm_config.yaml
     [title_canonical_map]. Pass-through if the title is not in the map.
 
-    Example: "ML Engineer" → "Machine Learning Engineer" (more API results).
+    Example: "ML Engineer" -> "Machine Learning Engineer" (more API results).
     Domain-agnostic -- the map is configured externally, not hardcoded here.
     """
     canonical = cfg.title_canonical_map.get(title, title)
     if canonical != title:
         logger.info(
-            f"[job_search] Title canonicalised: '{title}' → '{canonical}'"
+            f"[job_search] Title canonicalised: '{title}' -> '{canonical}'"
         )
     return canonical
+
+
+# -- Normalize helper ----------------------------------------------------------
+
+def _normalize_batch(
+    raw_jobs:        list[dict],
+    source:          str,
+    matched_profile: str,
+) -> list[RawJob]:
+    """
+    Normalize a list of raw job dicts from a named source.
+
+    Dispatches to the source's own normalize() function via _NORMALIZERS.
+    Jobs failing any quality gate return None and are excluded.
+    Logs a per-source summary for observability.
+    """
+    normalizer = _NORMALIZERS.get(source)
+    if not normalizer:
+        logger.error(f"[job_search] No normalizer registered for source '{source}'")
+        return []
+
+    results = []
+    dropped = 0
+    for raw in raw_jobs:
+        job = normalizer(raw, matched_profile)
+        if job:
+            results.append(job)
+        else:
+            dropped += 1
+
+    logger.info(
+        f"[normalizer] {source}: "
+        f"{len(results)} passed quality gates, {dropped} dropped | "
+        f"profile='{matched_profile}'"
+    )
+    return results
 
 
 # -- Per-profile search --------------------------------------------------------
 
 async def _search_one_profile(
     profile_title: str,
-    location:      str,
+    location:      Optional[str],
 ) -> tuple[list[RawJob], dict[str, dict[str, int]]]:
     """
     Run all active sources for a single profile in parallel.
+
+    Iterates the SOURCES registry, skipping sources that are disabled in
+    llm_config.yaml. Each enabled source's search() is launched as a
+    concurrent coroutine. Results are normalized and collected.
 
     Returns (jobs, source_stats) where source_stats maps each attempted
     source name to {"jobs": int, "errors": int}. Never raises --
@@ -78,75 +117,39 @@ async def _search_one_profile(
     """
     tasks: list[tuple[str, Coroutine]] = []
 
-    # JSearch -- Google Jobs aggregator (500 calls/month free)
-    tasks.append((
-        "jsearch", search_jsearch(
-            profile_title = profile_title,
-            location      = location,
-            num_pages     = cfg.job_search.num_pages,
+    for source_module in SOURCES:
+        spec       = source_module.SOURCE_SPEC
+        name       = spec["name"]
+        always_on  = spec.get("always_on", False)
+        source_cfg = cfg.job_search.source(name)
+
+        # Skip disabled sources (unless always_on)
+        if not always_on and not source_cfg.enabled:
+            continue
+
+        pages = source_cfg.pages if not always_on else cfg.job_search.num_pages
+        loc   = (location or "") if spec.get("requires_location", True) else ""
+
+        tasks.append((
+            name,
+            source_module.search(profile_title, loc, pages),
+        ))
+
+    if not tasks:
+        logger.warning(
+            f"[job_search] No sources enabled for '{profile_title}'. "
+            f"Enable at least one source in llm_config.yaml [job_search.sources]."
         )
-    ))
+        return [], {}
 
-    # Active Jobs DB -- same JSearch schema, separate key (~200 calls/month free)
-    if cfg.job_search.active_jobs_db_enabled:
-        tasks.append((
-            "active_jobs_db", search_active_jobs_db(
-                profile_title = profile_title,
-                location      = location,
-                num_pages     = cfg.job_search.active_jobs_db_pages,
-            )
-        ))
-
-    # LinkedIn Jobs API -- LinkedIn listings (~100 calls/month free)
-    if cfg.job_search.linkedin_jobs_enabled:
-        tasks.append((
-            "linkedin_jobs", search_linkedin_jobs(
-                profile_title = profile_title,
-                location      = location,
-                num_pages     = cfg.job_search.linkedin_jobs_pages,
-            )
-        ))
-
-    # Techmap -- 240-country coverage, full JDs (1,000 jobs/month free)
-    if cfg.job_search.techmap_enabled:
-        tasks.append((
-            "techmap", search_techmap(
-                profile_title = profile_title,
-                location      = location,
-                work_type     = "any",
-                num_pages     = cfg.job_search.techmap_pages,
-            )
-        ))
-
-    # Jobs Search API -- broad ATS coverage (trial plan free)
-    if cfg.job_search.jobs_search_api_enabled:
-        tasks.append((
-            "jobs_search_api", search_jobs_search_api(
-                profile_title = profile_title,
-                location      = location,
-                num_pages     = cfg.job_search.jobs_search_api_pages,
-            )
-        ))
-
-    # RemoteOK -- always active; global remote listings complement location-based results.
-    # Ranker E3 location filter and india_accessible filter gate final inclusion.
-    tasks.append((
-        "remoteok", search_remoteok(
-            profile_title = profile_title,
-            max_results   = 15,
-        )
-    ))
-
-    # Run all sources concurrently
     sources, coroutines = zip(*tasks)
     results = await asyncio.gather(*coroutines, return_exceptions=True)
 
     all_jobs: list[RawJob] = []
-    # Initialise stats for every attempted source so callers can tell apart
-    # "source returned 0 jobs" from "source was disabled / not attempted".
     source_stats: dict[str, dict[str, int]] = {
         s: {"jobs": 0, "errors": 0} for s in sources
     }
+
     for source, result in zip(sources, results):
         if isinstance(result, Exception):
             source_stats[source]["errors"] += 1
@@ -156,15 +159,14 @@ async def _search_one_profile(
             )
             continue
 
-        normalized = normalize_jobs(
+        normalized = _normalize_batch(
             raw_jobs        = result,
             source          = source,
             matched_profile = profile_title,
         )
         source_stats[source]["jobs"] += len(normalized)
         logger.info(
-            f"[job_search] {source}: {len(normalized)} jobs "
-            f"for '{profile_title}'"
+            f"[job_search] {source}: {len(normalized)} jobs for '{profile_title}'"
         )
         all_jobs.extend(normalized)
 
@@ -177,14 +179,13 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
     """
     Agent 3 -- Job Search Agent.
 
-    Runs parallel searches across all active sources for each
-    confirmed profile. Writes raw_jobs[] to session state.
+    Runs parallel searches across all active sources for each confirmed
+    profile. Writes raw_jobs[] to session state.
 
     Also writes per-source contribution counts to
     state.agent_metrics["job_search"] so silent-zero sources (e.g.
-    quota-exhausted or mis-keyed APIs) become visible at the session
-    level. Domain-agnostic -- no assumptions about resume content or
-    role type.
+    quota-exhausted or mis-keyed APIs) become visible at the session level.
+    Domain-agnostic -- no assumptions about resume content or role type.
 
     Returns updated SessionState.
     """
@@ -204,7 +205,7 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
     location = prefs.location
 
     # Build search tasks: one per (confirmed profile + each search variant).
-    # Canonicalise each title before querying: "ML Engineer" →
+    # Canonicalise each title before querying: "ML Engineer" ->
     # "Machine Learning Engineer" to maximise API result coverage.
     # Variants are searched with the parent profile title as matched_profile
     # so downstream attribution stays correct.
@@ -294,13 +295,46 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
     state.error    = None
     all_jobs       = deduped_jobs   # keep local var consistent for the warning below
 
+    # -- Initialize pipeline audit for every job entering the pipeline ----------
+    # Done here (after exact job_id dedup) so each unique job gets exactly one
+    # entry. All score/filter fields start as None and are filled in by
+    # downstream agents (url_pruner, dedup, hyde, ranker).
+    for job in deduped_jobs:
+        state.pipeline_audit[job.job_id] = {
+            # Identity
+            "job_id":          job.job_id,
+            "title":           job.title or "",
+            "company":         job.company or "",
+            "location":        job.location or "",
+            "work_type":       job.work_type or "",
+            "source":          job.source or "",
+            "apply_url":       (job.apply_url or "")[:120],
+            "matched_profile": job.matched_profile or "",
+            "jd_word_count":   len((job.jd_text or "").split()),
+            "posted_date":     job.posted_date.isoformat() if job.posted_date else None,
+            # Journey tracking
+            "status":          "passed",   # updated to "dropped" at each stage
+            "dropped_at":      None,       # stage name where dropped
+            "drop_reason":     None,       # human-readable reason
+            # HyDE prefilter (filled by hyde_agent)
+            "jd1_emb_score":   None,
+            "jd2_emb_score":   None,
+            "hyde_section":    None,       # "S1" | "S2" | "dropped"
+            # Ranker scores (filled by ranker_agent)
+            "fit_score":       None,
+            "title_relevance": None,
+            "experience_score":  None,
+            "skill_match_score": None,
+            "domain_score":    None,
+            "education_score": None,
+            "sparse_jd":       False,
+            "final_rank":      None,       # 1-based rank in final output
+        }
+
     # -- Per-source observability --------------------------------------------
-    # Surface contribution counts so silent-zero sources (e.g. exhausted
-    # quotas, missing keys, schema drift) become visible in MLflow and in
-    # the session_metrics payload returned to the API layer.
     elapsed = round(time.perf_counter() - _t0, 2)
-    confirmed_titles  = [p.title for p in state.confirmed_profiles]
-    variant_searches  = [st for st, mp in search_tasks if st not in confirmed_titles]
+    confirmed_titles = [p.title for p in state.confirmed_profiles]
+    variant_searches = [st for st, mp in search_tasks if st not in confirmed_titles]
 
     state.agent_metrics["job_search"] = {
         "latency_secs":       elapsed,
@@ -323,17 +357,10 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
     ]
 
     if not all_jobs:
-        # All upstream sources returned zero jobs. Most common causes:
-        #   1. RapidAPI free-tier quota exhausted for the month
-        #   2. Confirmed profiles too narrow for the configured location
-        #   3. All sources transiently unavailable
-        # We don't fail the pipeline -- downstream nodes skip on empty raw_jobs,
-        # finalise marks results_ready=True, and the API surfaces an empty-state
-        # message via the /status and /results endpoints.
         logger.warning(
             f"[job_search] ZERO jobs returned across "
             f"{len(state.confirmed_profiles)} confirmed profile(s). "
-            f"Per-source: {', '.join(summary_parts)}. "
+            f"Per-source: {', '.join(summary_parts) or 'no sources attempted'}. "
             f"Likely causes: API quota exhausted, narrow profile titles, or "
             f"transient source outage."
         )
@@ -344,10 +371,6 @@ async def run_job_search_agent(state: SessionState) -> SessionState:
             f"per-source: {', '.join(summary_parts)} | latency={elapsed}s"
         )
         if silent_zero_sources:
-            # These sources were configured + attempted but contributed 0 jobs
-            # without raising errors -- usually a missing/invalid API key or
-            # an exhausted quota. Surface as a single WARNING so it is easy
-            # to spot during a demo.
             logger.warning(
                 f"[job_search] Silent-zero source(s): {silent_zero_sources}. "
                 f"Check API keys / quotas in .env -- these contributed nothing "

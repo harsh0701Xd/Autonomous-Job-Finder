@@ -20,14 +20,13 @@ services:
 
       - "8000:8000"
 
-      - "5001:5001"
-
     env_file:
 
       - .env
 
     environment:
-
+      - GIT_PYTHON_REFRESH=quiet
+        
       - APP_ENV=production
 
       - DATABASE_URL=postgresql://jobfinder:jobfinder@postgres:5432/jobfinder
@@ -64,6 +63,8 @@ services:
 
       --reload
 
+      --reload-exclude mlruns
+
       --timeout-keep-alive 120
 
     restart: unless-stopped
@@ -86,7 +87,39 @@ services:
 
 
 
-  #  PostgreSQL (LangGraph checkpointer + session store) 
+  #  MLflow UI (observability -- pipeline audit + metrics)
+
+  mlflow:
+
+    image: python:3.11-slim
+
+    container_name: job-finder-mlflow
+
+    command: >
+
+      bash -c "pip install mlflow>=2.14.0 -q &&
+      mlflow ui
+      --backend-store-uri /app/mlruns
+      --host 0.0.0.0
+      --port 5001"
+
+    ports:
+
+      - "5001:5001"
+
+    volumes:
+
+      - .:/app
+
+    restart: unless-stopped
+
+    networks:
+
+      - jobfinder-net
+
+
+
+  #  PostgreSQL (LangGraph checkpointer + session store)
 
   postgres:
 
