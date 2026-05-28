@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +25,9 @@ if TYPE_CHECKING:
     from core.observability.metrics import SessionMetrics
 
 logger = logging.getLogger(__name__)
+
+# Silence the GitPython warning that fires when git is not on PATH inside Docker
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 
 _EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT", "autonomous-job-finder")
 
@@ -103,16 +105,17 @@ def log_session_metrics(
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(f"quality_{key}", value)
 
-            # Per-job audit artifact -- written to a temp directory as job_audit.json
-            # and logged so it lives inside the run directory under mlruns/.
+            # Per-job audit artifact -- logged as a dict via the MLflow REST API.
+            # log_dict() uploads through the tracking server's HTTP endpoint,
+            # avoiding direct filesystem writes to /mlflow/artifacts which is
+            # only mounted inside the MLflow server container (not the API container).
             # View in MLflow UI: run page -> Artifacts tab -> job_audit.json
             if job_audit:
                 try:
-                    with tempfile.TemporaryDirectory() as tmp_dir:
-                        artifact_file = os.path.join(tmp_dir, "job_audit.json")
-                        with open(artifact_file, "w") as fh:
-                            json.dump(job_audit, fh, indent=2, default=str)
-                        mlflow.log_artifact(artifact_file, artifact_path="")
+                    mlflow.log_dict(
+                        {"jobs": job_audit},
+                        artifact_file="job_audit.json",
+                    )
                     logger.info(f"[mlflow] Logged job_audit.json ({len(job_audit)} entries)")
                 except Exception as artifact_err:
                     logger.warning(f"[mlflow] Failed to log job_audit artifact: {artifact_err}")
