@@ -23,7 +23,11 @@ Required keys:
 |---|---|
 | `ANTHROPIC_API_KEY` | All LLM agents (parser, recommender, HyDE, ranker) |
 | `VOYAGE_API_KEY` | HyDE prefilter (embedding) |
-| `RAPIDAPI_KEY` | Job search (JSearch, Active Jobs DB, Techmap, Jobs Search API) |
+| `JSEARCH_API_KEY` | Job search — JSearch (required) |
+| `ACTIVE_JOBS_DB_API_KEY` | Job search — Active Jobs DB (optional) |
+| `JOBS_SEARCH_API_KEY` | Job search — Jobs Search API (optional) |
+| `TECHMAP_API_KEY` | Job search — Techmap (optional) |
+| `LINKEDIN_JOBS_API_KEY` | Job search — LinkedIn Jobs via RapidAPI (optional) |
 
 ---
 

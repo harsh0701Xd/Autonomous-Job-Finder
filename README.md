@@ -118,7 +118,7 @@ autonomous-job-finder/
 
 **1. Clone and configure**
 ```bash
-git clone https://github.com/<your-username>/autonomous-job-finder.git
+git clone https://github.com/harsh0701Xd/Autonomous-Job-Finder.git
 cd autonomous-job-finder
 cp .env.example .env
 # Fill in your API keys in .env
@@ -126,7 +126,7 @@ cp .env.example .env
 
 **2. Start everything**
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
 **3. Open the app**
@@ -147,7 +147,11 @@ All keys are documented in [`.env.example`](.env.example). Required keys:
 |---|---|
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
 | `VOYAGE_API_KEY` | [dash.voyageai.com](https://dash.voyageai.com) |
-| `RAPIDAPI_KEY` | [rapidapi.com](https://rapidapi.com) |
+| `JSEARCH_API_KEY` | [rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) |
+| `ACTIVE_JOBS_DB_API_KEY` | [rapidapi.com](https://rapidapi.com/bebity/api/active-jobs-db) (optional — enables Active Jobs DB source) |
+| `JOBS_SEARCH_API_KEY` | [rapidapi.com](https://rapidapi.com/fantastic-jobs/api/jobs-search-api) (optional — enables Jobs Search API source) |
+| `TECHMAP_API_KEY` | [rapidapi.com](https://rapidapi.com/techmap-io-techmap-io-default/api/daily-international-job-postings) (optional — enables Techmap source) |
+| `LINKEDIN_JOBS_API_KEY` | [rapidapi.com](https://rapidapi.com/fantastic-jobs/api/linkedin-job-search-api) (optional — enables LinkedIn Jobs source) |
 | `DATABASE_URL` | Auto-set by Docker Compose from `POSTGRES_*` vars |
 | `LANGSMITH_API_KEY` | [smith.langchain.com](https://smith.langchain.com) (optional, for tracing) |
 
