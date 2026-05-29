@@ -135,7 +135,7 @@ services:
       --host 0.0.0.0
       --port 5000
       --backend-store-uri postgresql://jobfinder:${POSTGRES_PASSWORD}@postgres:5432/jobfinder
-      --default-artifact-root /mlflow/artifacts
+      --default-artifact-root mlflow-artifacts:///mlflow/artifacts
       --serve-artifacts
       --workers 1
       --disable-security-middleware
